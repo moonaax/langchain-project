@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>DeepSeek Chat</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  /* ── 主题变量 ── */
+  [data-theme="dark"] {
+    --bg: #07070a;
+    --bg-sidebar: rgba(12,12,18,0.5);
+    --bg-topbar: rgba(7,7,10,0.4);
+    --bg-fade: #07070a;
+    --glass: rgba(255,255,255,0.035);
+    --glass-hover: rgba(255,255,255,0.065);
+    --glass-strong: rgba(255,255,255,0.08);
+    --glass-border: rgba(255,255,255,0.08);
+    --glass-border-hover: rgba(255,255,255,0.14);
+    --glass-inset: rgba(255,255,255,0.04);
+    --text: #f2f2f7;
+    --text-2: #b0b0c0;
+    --text-3: #70708a;
+    --msg-ai-bg: rgba(255,255,255,0.035);
+    --scrollbar: rgba(255,255,255,0.06);
+    --shadow-card: rgba(0,0,0,0.15);
+    --shadow-input: rgba(0,0,0,0.2);
+    --orb1: rgba(168,85,247,0.13);
+    --orb2: rgba(99,102,241,0.11);
+    --orb3: rgba(249,115,22,0.06);
+  }
+  [data-theme="light"] {
+    --bg: #f5f5f7;
+    --bg-sidebar: rgba(255,255,255,0.6);
+    --bg-topbar: rgba(245,245,247,0.5);
+    --bg-fade: #f5f5f7;
+    --glass: rgba(255,255,255,0.5);
+    --glass-hover: rgba(255,255,255,0.7);
+    --glass-strong: rgba(255,255,255,0.8);
+    --glass-border: rgba(0,0,0,0.08);
+    --glass-border-hover: rgba(0,0,0,0.14);
+    --glass-inset: rgba(255,255,255,0.6);
+    --text: #1a1a1e;
+    --text-2: #52525b;
+    --text-3: #8a8a96;
+    --msg-ai-bg: rgba(255,255,255,0.55);
+    --scrollbar: rgba(0,0,0,0.08);
+    --shadow-card: rgba(0,0,0,0.06);
+    --shadow-input: rgba(0,0,0,0.06);
+    --orb1: rgba(168,85,247,0.08);
+    --orb2: rgba(99,102,241,0.06);
+    --orb3: rgba(249,115,22,0.05);
+  }
+  /* ── 共享 accent ── */
+  :root {
+    --orange: #f97316;
+    --orange-g: linear-gradient(135deg,#f97316,#fb923c,#fbbf24);
+    --orange-glow: rgba(249,115,22,0.3);
+  }
+  [data-theme="light"] { --orange-glow: rgba(249,115,22,0.2); }
+
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex;font-size:14px;-webkit-font-smoothing:antialiased;overflow:hidden;position:relative;transition:background .3s,color .3s}
+
+  /* ── 环境光 ── */
+  .orb{position:fixed;border-radius:50%;filter:blur(100px);pointer-events:none;z-index:0;transition:background .5s}
+  .orb-1{width:500px;height:500px;top:-15%;left:-8%;background:radial-gradient(circle,var(--orb1),transparent 70%);animation:d1 16s ease-in-out infinite alternate}
+  .orb-2{width:450px;height:450px;bottom:-10%;right:-5%;background:radial-gradient(circle,var(--orb2),transparent 70%);animation:d2 14s ease-in-out infinite alternate}
+  .orb-3{width:300px;height:300px;top:40%;left:40%;background:radial-gradient(circle,var(--orb3),transparent 70%);animation:d3 18s ease-in-out infinite alternate}
+  @keyframes d1{to{transform:translate(60px,40px)}}
+  @keyframes d2{to{transform:translate(-50px,-30px)}}
+  @keyframes d3{to{transform:translate(-30px,50px)}}
+
+  /* ── 侧边栏 ── */
+  #sidebar{width:250px;background:var(--bg-sidebar);backdrop-filter:blur(60px) saturate(1.6);border-right:1px solid var(--glass-border);display:flex;flex-direction:column;z-index:1;transition:background .3s,border-color .3s}
+  #s-top{padding:20px 16px 14px;padding-top:52px;-webkit-app-region:drag}
+  .brand{font-size:14px;font-weight:700;letter-spacing:-0.4px;display:flex;align-items:center;gap:9px}
+  .brand-icon{width:26px;height:26px;background:var(--orange-g);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:13px;box-shadow:0 0 20px var(--orange-glow),inset 0 1px 0 rgba(255,255,255,0.2)}
+  #new-btn{-webkit-app-region:no-drag;margin:6px 12px 4px;padding:9px 0;background:var(--glass);backdrop-filter:blur(20px);border:1px solid var(--glass-border);border-radius:10px;color:var(--text-2);font-size:13px;font-family:inherit;cursor:pointer;transition:all .2s}
+  #new-btn:hover{background:var(--glass-hover);border-color:var(--glass-border-hover);color:var(--text);box-shadow:0 2px 20px var(--shadow-input)}
+  #sessions{flex:1;overflow-y:auto;padding:4px 8px}
+  #sessions::-webkit-scrollbar{width:0}
+  .sess{padding:9px 12px;border-radius:10px;cursor:pointer;color:var(--text-3);font-size:13px;transition:all .2s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sess:hover{background:var(--glass);color:var(--text-2)}
+  .sess.active{background:var(--glass-hover);color:var(--text);box-shadow:inset 0 0 0 1px var(--glass-border)}
+  #s-foot{padding:12px 16px;border-top:1px solid var(--glass-border);display:flex;align-items:center;justify-content:space-between}
+  .tag{font-size:11px;color:var(--text-3);display:flex;align-items:center;gap:7px}
+  .tag .dot{width:5px;height:5px;border-radius:50%;background:#22c55e;box-shadow:0 0 8px rgba(34,197,94,0.6)}
+  /* 主题切换按钮 */
+  #theme-btn{background:var(--glass);backdrop-filter:blur(10px);border:1px solid var(--glass-border);color:var(--text-3);width:30px;height:30px;border-radius:8px;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:all .2s;-webkit-app-region:no-drag}
+  #theme-btn:hover{background:var(--glass-hover);border-color:var(--glass-border-hover);color:var(--text-2);transform:scale(1.05)}
+
+  /* ── 主区域 ── */
+  #main{flex:1;display:flex;flex-direction:column;z-index:1;position:relative}
+  #topbar{height:44px;padding-top:28px;border-bottom:1px solid var(--glass-border);display:flex;align-items:center;padding-left:20px;padding-right:16px;box-sizing:content-box;-webkit-app-region:drag;background:var(--bg-topbar);backdrop-filter:blur(40px);transition:background .3s,border-color .3s}
+  #topbar .t{font-size:13px;color:var(--text-3);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:400px}
+  .sp{flex:1}
+  #topbar button{-webkit-app-region:no-drag;background:var(--glass);backdrop-filter:blur(10px);border:1px solid var(--glass-border);color:var(--text-3);cursor:pointer;font-size:11px;font-family:inherit;padding:5px 12px;border-radius:8px;transition:all .2s}
+  #topbar button:hover{color:var(--text-2);background:var(--glass-hover);border-color:var(--glass-border-hover)}
+
+  /* ── 消息 ── */
+  #messages{flex:1;overflow-y:auto}
+  #messages::-webkit-scrollbar{width:4px}
+  #messages::-webkit-scrollbar-thumb{background:var(--scrollbar);border-radius:2px}
+  #thread{max-width:720px;margin:0 auto;padding:28px 24px}
+  .msg{margin-bottom:24px;animation:msgIn .45s cubic-bezier(.16,1,.3,1) both}
+  @keyframes msgIn{from{opacity:0;transform:translateY(14px)}}
+  .msg .role{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px;display:flex;align-items:center;gap:7px}
+  .msg .role.user{color:var(--text-3)}
+  .msg .role.ai{color:var(--orange)}
+  .msg .role .b{width:20px;height:20px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:9px}
+  .msg .role.user .b{background:var(--glass-strong);border:1px solid var(--glass-border)}
+  .msg .role.ai .b{background:var(--orange-g);box-shadow:0 0 14px var(--orange-glow);color:#fff}
+  .msg .body{line-height:1.7;white-space:pre-wrap;word-break:break-word}
+  .msg .body.u{color:var(--text);padding-left:27px}
+  .msg .body.a{color:var(--text);background:var(--msg-ai-bg);backdrop-filter:blur(30px) saturate(1.3);border:1px solid var(--glass-border);border-radius:12px;padding:16px 20px;box-shadow:0 4px 24px var(--shadow-card),inset 0 1px 0 var(--glass-inset);transition:background .3s,border-color .3s}
+  .blink::after{content:'▍';color:var(--orange);animation:bk 1s step-end infinite}
+  @keyframes bk{50%{opacity:0}}
+
+  /* ── 欢迎 ── */
+  #welcome{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:8px;padding-bottom:80px}
+  .w-orb{width:64px;height:64px;background:var(--orange-g);border-radius:18px;display:flex;align-items:center;justify-content:center;font-size:28px;box-shadow:0 0 50px var(--orange-glow),0 0 100px rgba(249,115,22,0.1),inset 0 2px 0 rgba(255,255,255,0.15);margin-bottom:12px;animation:fl 4s ease-in-out infinite;position:relative}
+  .w-orb::after{content:'';position:absolute;inset:-8px;border-radius:22px;border:1px solid rgba(249,115,22,0.12);animation:pulse 3s ease-in-out infinite}
+  @keyframes fl{50%{transform:translateY(-8px)}}
+  @keyframes pulse{0%,100%{opacity:0;transform:scale(1)}50%{opacity:1;transform:scale(1.06)}}
+  .w-t{font-size:22px;font-weight:700;letter-spacing:-.5px}
+  [data-theme="dark"] .w-t{background:linear-gradient(135deg,#fff,var(--text-2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  [data-theme="light"] .w-t{color:var(--text)}
+  .w-s{font-size:13px;color:var(--text-3)}
+  .w-chips{display:flex;gap:6px;margin-top:16px;flex-wrap:wrap;justify-content:center}
+  .chip{font-size:12px;color:var(--text-2);background:var(--glass);backdrop-filter:blur(20px);border:1px solid var(--glass-border);padding:7px 14px;border-radius:10px;cursor:pointer;transition:all .2s}
+  .chip:hover{background:var(--glass-hover);border-color:var(--glass-border-hover);color:var(--text);transform:translateY(-1px);box-shadow:0 4px 12px var(--shadow-card)}
+
+  /* ── 输入 ── */
+  #input-area{padding:0 24px 24px;position:relative}
+  #input-area::before{content:'';position:absolute;top:-80px;left:0;right:0;height:80px;background:linear-gradient(to top,var(--bg-fade),transparent);pointer-events:none}
+  #input-box{max-width:720px;margin:0 auto;background:var(--glass);backdrop-filter:blur(40px) saturate(1.4);border:1px solid var(--glass-border);border-radius:12px;padding:14px 16px;display:flex;align-items:center;gap:10px;transition:all .3s;position:relative;box-shadow:0 4px 30px var(--shadow-input)}
+  #input-box::before{content:'';position:absolute;inset:-1px;border-radius:13px;padding:1px;background:linear-gradient(135deg,transparent,transparent,transparent);mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);mask-composite:exclude;transition:all .4s;pointer-events:none;opacity:0}
+  #input-box:focus-within{background:var(--glass-hover);border-color:var(--glass-border-hover);box-shadow:0 0 50px rgba(249,115,22,0.06),0 0 100px rgba(168,85,247,0.04),0 8px 32px var(--shadow-input)}
+  #input-box:focus-within::before{opacity:1;background:linear-gradient(135deg,rgba(249,115,22,0.2),rgba(168,85,247,0.1),rgba(99,102,241,0.1))}
+  #input{flex:1;background:none;border:none;color:var(--text);font-size:14px;font-family:inherit;outline:none;resize:none;height:22px;max-height:140px;line-height:22px}
+  #input::placeholder{color:var(--text-3)}
+  #send{background:var(--orange-g);color:#fff;border:none;width:34px;height:34px;border-radius:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .2s;flex-shrink:0;box-shadow:0 0 20px var(--orange-glow),inset 0 1px 0 rgba(255,255,255,0.2)}
+  #send:hover{transform:scale(1.08);box-shadow:0 0 30px var(--orange-glow)}
+  #send:disabled{background:var(--glass-strong);color:var(--text-3);box-shadow:none;transform:none}
+  #send svg{width:15px;height:15px}
+  #hint{max-width:720px;margin:8px auto 0;font-size:11px;color:var(--text-3);text-align:center;opacity:0.6}
+</style>
+</head>
+<body>
+
+<div class="orb orb-1"></div>
+<div class="orb orb-2"></div>
+<div class="orb orb-3"></div>
+
+<div id="sidebar">
+  <div id="s-top"><div class="brand"><span class="brand-icon">⚡</span>DeepSeek Chat</div></div>
+  <button id="new-btn" onclick="clearChat()">+ New chat</button>
+  <div id="sessions"><div class="sess active">New conversation</div></div>
+  <div id="s-foot">
+    <div class="tag"><span class="dot"></span>deepseek-chat</div>
+    <button id="theme-btn" onclick="toggleTheme()" title="Toggle theme">🌙</button>
+  </div>
+</div>
+
+<div id="main">
+  <div id="topbar">
+    <span class="t">New conversation</span>
+    <span class="sp"></span>
+    <button onclick="clearChat()">Clear</button>
+  </div>
+
+  <div id="messages">
+    <div id="welcome">
+      <div class="w-orb">⚡</div>
+      <div class="w-t">What can I help with?</div>
+      <div class="w-s">Powered by LangChain + DeepSeek</div>
+      <div class="w-chips">
+        <div class="chip" onclick="ask(this)">💡 Explain LangChain</div>
+        <div class="chip" onclick="ask(this)">🧠 What is RAG?</div>
+        <div class="chip" onclick="ask(this)">🛠 Write a Python script</div>
+        <div class="chip" onclick="ask(this)">📖 Summarize a concept</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="input-area">
+    <div id="input-box">
+      <textarea id="input" rows="1" placeholder="Ask anything..." onkeydown="handleKey(event)"></textarea>
+      <button id="send" onclick="sendMessage()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg></button>
+    </div>
+    <div id="hint">⏎ Send · ⇧⏎ New line</div>
+  </div>
+</div>
+
+<script>
+const API='http://127.0.0.1:8000',messagesEl=document.getElementById('messages'),input=document.getElementById('input'),sendBtn=document.getElementById('send');
+const welcomeHTML=document.getElementById('welcome').outerHTML;
+
+/* ── 主题切换 ── */
+function toggleTheme(){
+  const html=document.documentElement;
+  const next=html.dataset.theme==='dark'?'light':'dark';
+  html.dataset.theme=next;
+  document.getElementById('theme-btn').textContent=next==='dark'?'🌙':'☀️';
+  localStorage.setItem('theme',next);
+}
+// 读取保存的主题
+(function(){
+  const saved=localStorage.getItem('theme');
+  if(saved){document.documentElement.dataset.theme=saved;document.getElementById('theme-btn').textContent=saved==='dark'?'🌙':'☀️'}
+})();
+
+function ask(el){input.value=el.textContent.slice(2).trim();sendMessage()}
+
+function addMsg(role){
+  document.getElementById('welcome')?.remove();
+  if(!document.getElementById('thread')){const t=document.createElement('div');t.id='thread';messagesEl.appendChild(t)}
+  const m=document.createElement('div');m.className='msg';
+  const icon=role==='user'?'→':'⚡',label=role==='user'?'You':'DeepSeek';
+  m.innerHTML=`<div class="role ${role}"><span class="b">${icon}</span>${label}</div><div class="body ${role==='user'?'u':'a'}"></div>`;
+  document.getElementById('thread').appendChild(m);
+  messagesEl.scrollTop=messagesEl.scrollHeight;
+  return m.querySelector('.body');
+}
+
+async function sendMessage(){
+  const text=input.value.trim();if(!text)return;
+  input.value='';input.style.height='22px';sendBtn.disabled=true;
+  addMsg('user').textContent=text;
+  const active=document.querySelector('.sess.active');
+  if(active&&active.textContent==='New conversation'){active.textContent=text;document.querySelector('#topbar .t').textContent=text}
+  const body=addMsg('ai');body.classList.add('blink');
+  try{
+    const res=await fetch(`${API}/chat`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});
+    const reader=res.body.getReader(),dec=new TextDecoder();
+    while(true){const{done,value}=await reader.read();if(done)break;for(const l of dec.decode(value).split('\n'))if(l.startsWith('data: ')&&l!=='data: [DONE]'){body.textContent+=l.slice(6);messagesEl.scrollTop=messagesEl.scrollHeight}}
+  }catch(e){body.textContent=`Connection error: ${e.message}`;body.style.color='#ef4444'}
+  body.classList.remove('blink');sendBtn.disabled=false;input.focus();
+}
+
+async function clearChat(){
+  await fetch(`${API}/clear`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{"session_id":"default"}'}).catch(()=>{});
+  messagesEl.innerHTML=welcomeHTML;
+  const active=document.querySelector('.sess.active');if(active)active.textContent='New conversation';
+  document.querySelector('#topbar .t').textContent='New conversation';
+}
+
+function handleKey(e){if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&!isComposing){e.preventDefault();sendMessage()}}
+let isComposing=false;
+input.addEventListener('compositionstart',()=>isComposing=true);
+input.addEventListener('compositionend',()=>isComposing=false);
+input.addEventListener('input',()=>{input.style.height='22px';input.style.height=Math.min(input.scrollHeight,140)+'px'});
+</script>
+</body>
+</html>
