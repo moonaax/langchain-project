@@ -116,6 +116,15 @@
   .blink::after{content:'▍';color:var(--orange);animation:bk 1s step-end infinite}
   @keyframes bk{50%{opacity:0}}
 
+  /* ── 工具调用卡片 ── */
+  .tool-call{margin:8px 0;padding:10px 14px;background:var(--glass);backdrop-filter:blur(20px);border:1px solid var(--glass-border);border-radius:10px;font-size:12px;line-height:1.6;animation:msgIn .3s cubic-bezier(.16,1,.3,1) both}
+  .tool-call .tool-header{display:flex;align-items:center;gap:6px;color:var(--orange);font-weight:600;margin-bottom:4px}
+  .tool-call .tool-header .tool-icon{font-size:13px}
+  .tool-call .tool-input{color:var(--text-3);font-family:'SF Mono',Menlo,monospace;font-size:11px;word-break:break-all}
+  .tool-call .tool-output{color:var(--text-2);margin-top:4px;padding-top:4px;border-top:1px solid var(--glass-border)}
+  .tool-call.pending{border-color:rgba(249,115,22,0.2);box-shadow:0 0 12px rgba(249,115,22,0.05)}
+  .tool-call.done{opacity:0.8}
+
   /* ── 欢迎 ── */
   #welcome{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:8px;padding-bottom:80px}
   .w-orb{width:64px;height:64px;background:var(--orange-g);border-radius:18px;display:flex;align-items:center;justify-content:center;font-size:28px;box-shadow:0 0 50px var(--orange-glow),0 0 100px rgba(249,115,22,0.1),inset 0 2px 0 rgba(255,255,255,0.15);margin-bottom:12px;animation:fl 4s ease-in-out infinite;position:relative}
@@ -230,13 +239,70 @@ async function sendMessage(){
   const active=document.querySelector('.sess.active');
   if(active&&active.textContent==='New conversation'){active.textContent=text;document.querySelector('#topbar .t').textContent=text}
   const body=addMsg('ai');body.classList.add('blink');
+
+  // 工具调用卡片的临时引用，用于在 tool_end 时回填结果
+  let currentToolCard=null;
+
   try{
     const res=await fetch(`${API}/chat`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});
     const reader=res.body.getReader(),dec=new TextDecoder();
-    while(true){const{done,value}=await reader.read();if(done)break;for(const l of dec.decode(value).split('\n'))if(l.startsWith('data: ')&&l!=='data: [DONE]'){body.textContent+=l.slice(6);messagesEl.scrollTop=messagesEl.scrollHeight}}
+    let buf='';
+    while(true){
+      const{done,value}=await reader.read();if(done)break;
+      buf+=dec.decode(value,{stream:true});
+      // SSE 消息以 \n\n 分隔，逐条解析
+      const parts=buf.split('\n\n');
+      buf=parts.pop(); // 最后一段可能不完整，留到下次
+      for(const part of parts){
+        if(!part.trim())continue;
+        const lines=part.split('\n');
+        let evtType='',evtData='';
+        for(const l of lines){
+          if(l.startsWith('event: '))evtType=l.slice(7);
+          else if(l.startsWith('data: '))evtData=l.slice(6);
+        }
+
+        if(evtType==='tool_start'){
+          // ── 工具开始调用：插入工具卡片 ──
+          const info=JSON.parse(evtData);
+          const card=document.createElement('div');
+          card.className='tool-call pending';
+          const inputStr=typeof info.input==='object'?JSON.stringify(info.input,null,0):String(info.input);
+          card.innerHTML=`<div class="tool-header"><span class="tool-icon">🔧</span>调用 ${info.tool}</div><div class="tool-input">${escHtml(inputStr)}</div><div class="tool-output">执行中...</div>`;
+          body.appendChild(card);
+          currentToolCard=card;
+          messagesEl.scrollTop=messagesEl.scrollHeight;
+
+        }else if(evtType==='tool_end'){
+          // ── 工具执行完成：回填结果 ──
+          const info=JSON.parse(evtData);
+          if(currentToolCard){
+            currentToolCard.querySelector('.tool-output').textContent='✅ '+info.output;
+            currentToolCard.classList.remove('pending');
+            currentToolCard.classList.add('done');
+            currentToolCard=null;
+          }
+          messagesEl.scrollTop=messagesEl.scrollHeight;
+
+        }else if(evtData&&evtData!=='[DONE]'){
+          // ── LLM token：追加文本 ──
+          // 确保文本节点存在（工具卡片之后的文本需要新的文本节点）
+          let textNode=body.lastChild;
+          if(!textNode||textNode.nodeType!==Node.TEXT_NODE){
+            textNode=document.createTextNode('');
+            body.appendChild(textNode);
+          }
+          textNode.textContent+=evtData;
+          messagesEl.scrollTop=messagesEl.scrollHeight;
+        }
+      }
+    }
   }catch(e){body.textContent=`Connection error: ${e.message}`;body.style.color='#ef4444'}
   body.classList.remove('blink');sendBtn.disabled=false;input.focus();
 }
+
+// HTML 转义，防止 XSS
+function escHtml(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 
 async function clearChat(){
   await fetch(`${API}/clear`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{"session_id":"default"}'}).catch(()=>{});

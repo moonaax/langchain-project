@@ -1,31 +1,31 @@
 """
-LangChain + DeepSeek 多轮对话客户端（终端版）
+LangChain + DeepSeek 工具调用 Agent（终端版）
+
+第二阶段：在多轮对话基础上添加 Tool Calling 能力
 
 AI Agent 知识点索引：
-- Model I/O: ChatModel 初始化、Prompt Template、Message 类型
-- LCEL: 管道符编排 (prompt | llm)、流式输出 (stream)
-- Memory: RunnableWithMessageHistory、InMemoryChatMessageHistory
+- Tool:  @tool 装饰器定义工具、工具描述的重要性
+- Agent: create_tool_calling_agent（基于 Function Calling 的现代方式）
+- AgentExecutor: 推理循环引擎（Thought → Action → Observation）
+- Memory: 在 Agent 中保持多轮对话记忆
 """
 
 import os
+import math
+from datetime import datetime
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.tools import tool
 from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain.agents import create_tool_calling_agent, AgentExecutor
 
 load_dotenv()
 
 # ============================================================
-# 【知识点】Model I/O — ChatModel 初始化
+# 【知识点】Model I/O — ChatModel 初始化（同第一阶段）
 # ============================================================
-# ChatOpenAI 是 LangChain 对 OpenAI 兼容接口的封装
-# DeepSeek 兼容 OpenAI 协议，只需改 base_url 和 model 即可接入
-# 关键参数：
-#   - model: 模型名称，决定能力和成本
-#   - temperature: 0=确定性输出，1=更随机，0.7 是常用平衡值
-#   - base_url: API 端点，切换不同模型提供商的关键
-#   - api_key: 从环境变量读取，不硬编码（安全最佳实践）
 llm = ChatOpenAI(
     model="deepseek-chat",
     base_url="https://api.deepseek.com",
@@ -34,45 +34,131 @@ llm = ChatOpenAI(
 )
 
 # ============================================================
-# 【知识点】Model I/O — Prompt Template
+# 【知识点】Tool — @tool 装饰器定义工具
 # ============================================================
-# ChatPromptTemplate 定义对话结构，由多个 Message 组成：
-#   - ("system", "..."):  SystemMessage，设定 AI 角色和行为约束
-#   - ("human", "{input}"): HumanMessage，用户输入，{input} 是变量占位符
-#   - MessagesPlaceholder:  动态插入位，运行时被替换为历史消息列表
+# @tool 是最简洁的工具定义方式，自动从函数签名和 docstring 提取：
+#   - name: 函数名（LLM 通过名称引用工具）
+#   - description: docstring（LLM 根据描述决定何时使用）
+#   - args_schema: 从类型注解自动生成 Pydantic Schema
 #
-# MessagesPlaceholder("history") 是实现多轮对话的关键：
-#   它会在运行时被替换为 [HumanMessage, AIMessage, HumanMessage, ...] 的列表
-#   让模型能看到之前的对话上下文
+# 工具描述的质量直接决定 Agent 表现！好的描述应包含：
+#   1. 用途：这个工具做什么
+#   2. 时机：什么情况下应该使用
+#   3. 输入：需要什么参数
+#   4. 限制：不能做什么（可选）
+
+@tool
+def calculator(expression: str) -> str:
+    """安全计算数学表达式并返回结果。
+
+    当用户需要进行数学计算时使用，包括加减乘除、幂运算、开方等。
+    输入应为合法的 Python 数学表达式，如 "2 + 3 * 4" 或 "math.sqrt(16)"。
+    """
+    allowed = {"math": math, "abs": abs, "round": round, "pow": pow}
+    try:
+        result = eval(expression, {"__builtins__": {}}, allowed)
+        return f"计算结果: {result}"
+    except Exception as e:
+        return f"计算错误: {e}，请检查表达式格式"
+
+@tool
+def get_current_time() -> str:
+    """获取当前日期和时间。当用户询问现在几点、今天日期时使用。"""
+    return datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")
+
+@tool
+def search_weather(city: str) -> str:
+    """查询指定城市的天气信息。输入城市名称，返回当前天气。
+
+    注意：这是模拟数据，实际项目中应接入真实天气 API。
+    """
+    weather_data = {
+        "北京": "晴天，25°C，湿度 40%",
+        "上海": "多云，22°C，湿度 65%",
+        "广州": "小雨，28°C，湿度 80%",
+        "深圳": "阴天，27°C，湿度 75%",
+        "杭州": "晴天，23°C，湿度 55%",
+    }
+    return weather_data.get(city, f"未找到 {city} 的天气信息，支持的城市：{', '.join(weather_data.keys())}")
+
+# 工具列表 — Agent 可用的所有工具
+# 控制在 3-8 个，太多会降低 LLM 选择准确率
+tools = [calculator, get_current_time, search_weather]
+
+# ============================================================
+# 【知识点】Agent — Prompt Template（与普通 Chain 的区别）
+# ============================================================
+# Agent 的 Prompt 必须包含 agent_scratchpad 占位符！
+# agent_scratchpad 用于存放 Agent 的中间推理过程：
+#   - 每次工具调用的 Action + Observation 都会追加到这里
+#   - LLM 看到之前的推理过程，决定下一步行动或给出最终答案
+#
+# 对比第一阶段的 Prompt：
+#   第一阶段: system + history + input（简单 Chain）
+#   第二阶段: system + history + input + agent_scratchpad（Agent）
 prompt = ChatPromptTemplate.from_messages([
-    ("system", "你是一个有帮助的 AI 助手，回答简洁准确。"),
+    ("system", """你是一个有帮助的 AI 助手，可以使用工具来回答问题。
+
+你可以使用以下工具：
+- calculator: 数学计算
+- get_current_time: 获取当前时间
+- search_weather: 查询天气
+
+如果用户的问题可以直接回答，就直接回答，不需要使用工具。
+如果需要使用工具，请使用后基于结果给出完整的回答。"""),
     MessagesPlaceholder(variable_name="history"),
     ("human", "{input}"),
+    # Agent 推理过程的暂存区（关键！）
+    # create_tool_calling_agent 会自动往这里填充中间步骤
+    MessagesPlaceholder(variable_name="agent_scratchpad"),
 ])
 
 # ============================================================
-# 【知识点】LCEL — 管道符编排
+# 【知识点】Agent — create_tool_calling_agent
 # ============================================================
-# LCEL (LangChain Expression Language) 用 | 管道符将组件串联成 Chain
-# prompt | llm 等价于：先用 prompt 格式化输入，再传给 llm 生成回复
-# 数据流：{"input": "你好"} → prompt.invoke() → [Messages] → llm.invoke() → AIMessage
+# 基于 LLM 原生 Function Calling 能力构建 Agent
+# 这是推荐的现代方式（对比 create_react_agent 的文本解析方式）
 #
-# 这是最简单的 Chain，后续可以扩展为：
-#   prompt | llm | output_parser          （加输出解析）
-#   prompt | llm | StrOutputParser()      （提取纯文本）
-#   retriever | prompt | llm              （RAG 检索增强）
-chain = prompt | llm
+# Function Calling 的优势：
+#   1. LLM 原生支持，参数解析更准确（不依赖正则匹配）
+#   2. 支持并行工具调用（一次调用多个工具）
+#   3. 不需要复杂的 Prompt 工程
+#
+# 返回的 agent 是一个 Runnable，但不能直接运行
+# 必须用 AgentExecutor 包装才能执行推理循环
+agent = create_tool_calling_agent(llm, tools, prompt)
 
 # ============================================================
-# 【知识点】Memory — 会话记忆存储
+# 【知识点】Agent — AgentExecutor 推理循环引擎
 # ============================================================
-# InMemoryChatMessageHistory: 在内存中存储消息列表
-# store 字典按 session_id 隔离不同会话的历史
-# 局限：进程重启后记忆丢失
-# 生产环境可替换为：
-#   - RedisChatMessageHistory（Redis 持久化）
-#   - SQLChatMessageHistory（数据库持久化）
-#   - FileChatMessageHistory（文件持久化）
+# AgentExecutor 是 Agent 的运行时，负责执行 "思考→行动→观察" 循环：
+#
+#   while True:
+#       action = agent.plan(input, intermediate_steps)
+#       if action == AgentFinish:  → 返回最终答案
+#       observation = tool.run(action)
+#       intermediate_steps.append((action, observation))
+#       if iterations > max_iterations:  → 强制停止
+#
+# 关键参数：
+#   - verbose=True: 打印推理过程（调试必备）
+#   - max_iterations=10: 防止无限循环（默认 15）
+#   - handle_parsing_errors=True: 自动处理 LLM 输出格式错误
+agent_executor = AgentExecutor(
+    agent=agent,
+    tools=tools,
+    verbose=True,           # 打印每一步推理过程
+    max_iterations=10,      # 最大循环次数，防止无限循环
+    handle_parsing_errors=True,  # 自动处理解析错误
+)
+
+# ============================================================
+# 【知识点】Memory — 在 Agent 中保持多轮对话记忆
+# ============================================================
+# 与第一阶段相同的记忆机制，但包装的对象从 chain 变成了 agent_executor
+# RunnableWithMessageHistory 会自动：
+#   1. 调用前：加载历史消息到 "history" 占位符
+#   2. 调用后：将本轮对话追加到历史
 store = {}
 
 def get_session_history(session_id: str):
@@ -80,18 +166,8 @@ def get_session_history(session_id: str):
         store[session_id] = InMemoryChatMessageHistory()
     return store[session_id]
 
-# ============================================================
-# 【知识点】Memory — RunnableWithMessageHistory
-# ============================================================
-# 包装原始 Chain，自动完成：
-#   1. 调用前：从 get_session_history 加载历史消息，注入到 "history" 占位符
-#   2. 调用后：将本轮的 HumanMessage + AIMessage 追加到历史
-# 参数说明：
-#   - input_messages_key="input": 告诉它用户输入在哪个字段
-#   - history_messages_key="history": 告诉它历史消息注入到哪个占位符
-# 使用时通过 config 传入 session_id 区分不同会话
-chain_with_memory = RunnableWithMessageHistory(
-    chain,
+agent_with_memory = RunnableWithMessageHistory(
+    agent_executor,
     get_session_history,
     input_messages_key="input",
     history_messages_key="history",
@@ -99,11 +175,10 @@ chain_with_memory = RunnableWithMessageHistory(
 
 def main():
     session_id = "default"
-    # config 通过 configurable 传递运行时参数（如 session_id）
-    # 这是 LCEL 的 RunnableConfig 机制
     config = {"configurable": {"session_id": session_id}}
 
-    print("🤖 DeepSeek 多轮对话客户端（输入 quit 退出，输入 clear 清空历史）\n")
+    print("🤖 DeepSeek Agent（输入 quit 退出，输入 clear 清空历史）")
+    print("🔧 可用工具: 数学计算 | 当前时间 | 天气查询\n")
 
     while True:
         user_input = input("你: ").strip()
@@ -119,22 +194,17 @@ def main():
 
         try:
             # ============================================================
-            # 【知识点】LCEL — 流式输出 (stream)
+            # 【知识点】Agent — invoke 调用
             # ============================================================
-            # stream() 返回一个生成器，逐 chunk 产出 AIMessageChunk
-            # 每个 chunk.content 是一小段文本（通常几个字）
-            # 优势：用户不用等全部生成完，首字延迟大幅降低
-            # 对比：
-            #   invoke()  → 等全部生成完，返回完整 AIMessage
-            #   stream()  → 逐块返回 AIMessageChunk（同步）
-            #   astream() → 逐块返回（异步，用于 FastAPI 等异步框架）
-            #   batch()   → 批量调用，提高吞吐量
-            print("AI: ", end="", flush=True)
-            for chunk in chain_with_memory.stream(
+            # Agent 不适合用 stream() 逐 token 输出，因为推理过程包含多轮
+            # 工具调用。invoke() 会等待整个推理循环完成后返回最终答案。
+            #
+            # 返回值是 dict: {"input": "...", "output": "最终答案", "history": [...]}
+            # 如果设置了 return_intermediate_steps=True，还会包含中间步骤
+            result = agent_with_memory.invoke(
                 {"input": user_input}, config=config
-            ):
-                print(chunk.content, end="", flush=True)
-            print("\n")
+            )
+            print(f"\nAI: {result['output']}\n")
         except Exception as e:
             print(f"\n❌ 错误: {e}\n")
 
