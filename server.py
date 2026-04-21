@@ -20,7 +20,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
 from tools import all_tools
 
 load_dotenv()
@@ -46,7 +46,12 @@ prompt = ChatPromptTemplate.from_messages([
 
 当用户询问技术知识时，优先使用 knowledge_search 从知识库中检索，基于检索结果回答。
 如果知识库中没有相关信息，再用你自己的知识回答。
-如果用户的问题可以直接回答，不需要使用工具。"""),
+如果用户的问题可以直接回答，不需要使用工具。
+
+格式要求：
+- 输出 Markdown 时，每个标题（#）前必须有空行
+- 表格每行必须独占一行，表头、分隔行、数据行之间不能有空行
+- 代码块必须用 ``` 包裹，不要省略"""),
     MessagesPlaceholder(variable_name="history"),
     ("human", "{input}"),
     MessagesPlaceholder(variable_name="agent_scratchpad"),

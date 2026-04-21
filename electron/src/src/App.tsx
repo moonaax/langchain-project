@@ -92,6 +92,7 @@ export default function App() {
               ...m, blocks: [...m.blocks, { type: 'tool_end', tool: info.tool, output: info.output }],
             } : m));
           } else if (evtData && evtData !== '[DONE]') {
+            console.log('[SSE token]', JSON.stringify(evtData));
             setMessages(prev => prev.map(m => {
               if (m.key !== aiKey) return m;
               const newContent = m.content + evtData;
@@ -155,10 +156,31 @@ export default function App() {
         }
         if (block.type === 'tool_end') return null; // 已在 tool_start 中渲染
         if (block.type === 'text') {
-          const md = block.text
-            .replace(/([^\n])(#{1,4}\s)/g, '$1\n\n$2')
+          // 先把代码块提取出来保护，避免内部 # 被当标题
+          const codeBlocks: string[] = [];
+          let raw = block.text.replace(/```[\s\S]*?```/g, (m) => {
+            codeBlocks.push(m);
+            return `__CODE_BLOCK_${codeBlocks.length - 1}__`;
+          });
+          raw = raw
+            .replace(/([^\n])(#{1,6}\s)/g, '$1\n\n$2')
             .replace(/([^\n])(```)/g, '$1\n\n$2')
-            .replace(/([^\n])(\|[-:]+)/g, '$1\n$2');
+            .replace(/([^\n])(- \*\*)/g, '$1\n$2')
+            .replace(/([^\n])(\d+\.\s)/g, '$1\n$2')
+            // 表格修复：在 | 开头的单元格前插入换行
+            .replace(/ \| (?=[^|\n]*\|)/g, ' |\n| ')
+            .replace(/\| \|/g, '|\n|')
+            .replace(/\n{2,}(\|)/g, '\n$1')
+            .replace(/([^\n])(\|[-:]+)/g, '$1\n$2')
+            .replace(/([^\n])(\| )/g, '$1\n$2');
+          // 还原代码块
+          let finalMd = raw.replace(/__CODE_BLOCK_(\d+)__/g, (_, i) => codeBlocks[+i]);
+          // 流式过程中代码块可能未闭合，补上 ```
+          const fenceCount = (finalMd.match(/```/g) || []).length;
+          if (fenceCount % 2 !== 0) finalMd += '\n```';
+          const md = finalMd;
+          console.log('[Markdown raw]', JSON.stringify(block.text.slice(0, 300)));
+          console.log('[Markdown processed]', JSON.stringify(md.slice(0, 300)));
           return <XMarkdown key={i}>{md}</XMarkdown>;
         }
         return null;
@@ -207,6 +229,9 @@ export default function App() {
           .ant-conversations .ant-conversations-item { border-radius: 10px !important; }
           .ant-sender { border-radius: 12px !important; backdrop-filter: blur(40px) saturate(1.4); box-shadow: 0 4px 30px ${isDark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.06)'}; transition: all 0.3s !important; }
           .ant-sender:focus-within { box-shadow: 0 0 50px rgba(249,115,22,0.06), 0 0 100px rgba(168,85,247,0.04), 0 8px 32px ${isDark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.06)'} !important; border-color: ${isDark ? 'rgba(255,255,255,0.14)' : 'rgba(0,0,0,0.14)'} !important; }
+          table { width: 100%; border-collapse: collapse; display: block; overflow-x: auto; font-size: 13px; }
+          th, td { border: 1px solid ${v.border}; padding: 6px 10px; white-space: nowrap; }
+          th { background: ${v.glass}; font-weight: 600; }
         `}</style>
 
         {/* 环境光晕 */}
