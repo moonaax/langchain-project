@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { ConfigProvider, theme, App as AntApp } from 'antd';
 import { Bubble, Sender, Conversations } from '@ant-design/x';
 import XMarkdown from '@ant-design/x-markdown';
@@ -6,7 +6,8 @@ import type { ConversationsProps } from '@ant-design/x';
 
 const API = 'http://127.0.0.1:8000';
 
-// 每条消息的内容块：文本或工具调用，按时间顺序排列
+// ── 类型定义 ──
+
 type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_start'; tool: string; input: string }
@@ -15,10 +16,317 @@ type ContentBlock =
 interface Msg {
   key: string;
   role: 'user' | 'ai';
-  content: string;       // 纯文本累积（给 Bubble 用）
+  content: string;
   streaming?: boolean;
-  blocks: ContentBlock[]; // 按时间顺序的内容块
+  blocks: ContentBlock[];
 }
+
+// ── SSE 解析 ──
+
+interface SSEEvent {
+  type: 'tool_start' | 'tool_end' | 'token' | 'done';
+  data?: any;
+}
+
+function parseSSEEvent(block: string): SSEEvent | null {
+  const lines = block.split('\n');
+  let evtType = '', evtData = '';
+  for (const l of lines) {
+    if (l.startsWith('event: ')) evtType = l.slice(7);
+    else if (l.startsWith('data: ')) evtData = l.slice(6);
+  }
+  if (!evtType && !evtData) return null;
+  if (evtType === 'tool_start') return { type: 'tool_start', data: JSON.parse(evtData) };
+  if (evtType === 'tool_end') return { type: 'tool_end', data: JSON.parse(evtData) };
+  if (evtData === '[DONE]') return { type: 'done' };
+  if (evtData) return { type: 'token', data: evtData };
+  return null;
+}
+
+// ── 思考指示器 ──
+
+function ThinkingIndicator({ v }: { v: typeof darkVars }) {
+  return (
+    <div style={{ display: 'flex', gap: 5, padding: '4px 0' }}>
+      {[0, 1, 2].map(i => (
+        <span key={i} style={{
+          width: 6, height: 6, borderRadius: '50%', background: v.text3,
+          animation: `dotBounce 1.2s ${i * 0.15}s infinite ease-in-out`,
+        }} />
+      ))}
+      <style>{`
+        @keyframes dotBounce {
+          0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+          40% { transform: scale(1); opacity: 1; }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+// ── 工具卡片 ──
+
+function ToolCard({ block, allBlocks, index, v }: {
+  block: ContentBlock & { type: 'tool_start' };
+  allBlocks: ContentBlock[];
+  index: number;
+  v: typeof darkVars;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const endBlock = allBlocks.slice(index + 1).find(
+    b => b.type === 'tool_end' && b.tool === block.tool
+  ) as (ContentBlock & { type: 'tool_end' }) | undefined;
+  const isDone = !!endBlock;
+
+  return (
+    <div style={{
+      margin: '6px 0', borderRadius: 10, fontSize: 12, overflow: 'hidden',
+      background: v.glass, border: `1px solid ${v.border}`,
+      backdropFilter: 'blur(20px)',
+      transition: 'border-color 0.3s',
+      borderColor: isDone ? 'rgba(34,197,94,0.25)' : 'rgba(249,115,22,0.2)',
+    }}>
+      {/* Header */}
+      <div
+        onClick={() => setExpanded(!expanded)}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '8px 12px', cursor: 'pointer',
+          background: isDone ? 'rgba(34,197,94,0.04)' : 'rgba(249,115,22,0.04)',
+          transition: 'background 0.2s',
+        }}
+      >
+        <span style={{ fontSize: 14 }}>{isDone ? '✅' : '⏳'}</span>
+        <span style={{ fontWeight: 600, color: v.text2 }}>{block.tool}</span>
+        <span style={{ flex: 1 }} />
+        <span style={{
+          fontSize: 10, color: isDone ? 'rgba(34,197,94,0.8)' : 'rgba(249,115,22,0.8)',
+          fontWeight: 500,
+        }}>
+          {isDone ? 'Done' : 'Running...'}
+        </span>
+        <span style={{
+          fontSize: 10, color: v.text3, transition: 'transform 0.2s',
+          transform: expanded ? 'rotate(180deg)' : 'rotate(0)',
+        }}>▾</span>
+      </div>
+
+      {/* Body */}
+      {expanded && (
+        <div style={{ borderTop: `1px solid ${v.border}` }}>
+          <div style={{ padding: '8px 12px', background: 'rgba(0,0,0,0.08)' }}>
+            <div style={{ fontSize: 10, color: v.text3, marginBottom: 4, fontWeight: 600 }}>Input</div>
+            <div style={{
+              fontFamily: "'SF Mono',Menlo,monospace", fontSize: 11, color: v.text2,
+              whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+            }}>{block.input}</div>
+          </div>
+          {endBlock && (
+            <div style={{ padding: '8px 12px' }}>
+              <div style={{ fontSize: 10, color: v.text3, marginBottom: 4, fontWeight: 600 }}>Output</div>
+              <div style={{ fontSize: 12, maxHeight: 200, overflow: 'auto' }}>
+                <XMarkdown>{renderMarkdown(endBlock.output)}</XMarkdown>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Markdown 渲染 ──
+
+// 修复一个被 || 压缩的表格段
+// 处理两种情况：
+// 1. || 在行内：| cell1 | cell2 ||| cell3 | cell4 || → 多行表格
+// 2. || 在行尾：| header1 | header2 || → 后面跟着数据行（由调用方拼接）
+function fixOneCollapsedTable(tableText: string): string {
+  const rowSegs = tableText.split(/\|{2,}/).filter(s => s.trim());
+  const rawRows: string[][] = [];
+  for (const seg of rowSegs) {
+    const inner = seg.replace(/^\||\|$/g, '');
+    const cells = inner.split('|').map(c => c.trim()).filter(Boolean);
+    if (cells.length >= 2) rawRows.push(cells);
+  }
+  if (rawRows.length < 2) return tableText;
+
+  // 过滤分隔行和残缺行
+  const dataRows = rawRows.filter(r => {
+    const nonEmpty = r.filter(c => c.trim());
+    return nonEmpty.length >= 2 && !r.every(c => /^[\s\-:]+$/.test(c));
+  });
+  if (dataRows.length < 2) return tableText;
+
+  const maxCols = Math.max(...dataRows.map(r => r.filter(c => c.trim()).length));
+  const normalized = dataRows.map(r => {
+    const nonEmpty = r.filter(c => c.trim());
+    while (nonEmpty.length < maxCols) nonEmpty.push('');
+    return `| ${nonEmpty.join(' | ')} |`;
+  });
+  normalized.splice(1, 0, `| ${Array(maxCols).fill('---').join(' | ')} |`);
+  return normalized.join('\n');
+}
+
+// 当 tableSeg 没有 || 时（表头行的 || 被剥离），用单 | 分割构建表格
+function buildTableFromPipes(text: string): string {
+  const rows = text.split('\n').filter(l => l.trim());
+  const parsed = rows.map(r => {
+    const inner = r.replace(/^\||\|$/g, '');
+    return inner.split('|').map(c => c.trim()).filter(Boolean);
+  }).filter(r => r.length >= 2);
+  if (parsed.length < 2) return text;
+  const maxCols = Math.max(...parsed.map(r => r.length));
+  const normalized = parsed.map(r => {
+    while (r.length < maxCols) r.push('');
+    return `| ${r.join(' | ')} |`;
+  });
+  normalized.splice(1, 0, `| ${Array(maxCols).fill('---').join(' | ')} |`);
+  return normalized.join('\n');
+}
+
+// 修复文本中所有被 || 压缩的表格（支持多个表格）
+// 策略：循环查找 ||，处理一个替换一个，用占位符防止重复处理
+function fixAllCollapsedTables(text: string): string {
+  let result = text;
+  const placeholders: string[] = [];
+  const safety = 30;
+
+  for (let iter = 0; iter < safety; iter++) {
+    const pos = result.indexOf('||');
+    if (pos === -1) break;
+
+    // 向左扩展：找到行首
+    let start = pos;
+    while (start > 0 && result[start - 1] !== '\n') start--;
+
+    // 向右扩展：找到行尾
+    let end = pos + 2;
+    while (end < result.length && result[end] !== '\n') end++;
+
+    // 向上查找表头行：如果上一行有 |，且当前行以 | 开头，上一行是表头
+    if (start > 0) {
+      let prevEnd = start - 1;
+      while (prevEnd > 0 && result[prevEnd] !== '\n') prevEnd--;
+      const prevLine = result.slice(prevEnd, start - 1);
+      if (prevLine.includes('|') && result[start] === '|') {
+        start = prevEnd;
+      }
+    }
+
+    // 向下查找数据行：如果当前行包含 || 且下一行以 | 开头，扩展到包含数据行
+    const currentLine = result.slice(start, end);
+    if (currentLine.includes('||')) {
+      let nextLineEnd = end;
+      if (end < result.length && result[end] === '\n') {
+        let nextStart = end + 1;
+        while (nextStart < result.length && result[nextStart] !== '\n') nextStart++;
+        const nextLine = result.slice(end + 1, nextStart);
+        if (nextLine.startsWith('|')) {
+          nextLineEnd = nextStart;
+          // 继续向下扩展更多数据行
+          while (nextLineEnd < result.length) {
+            if (result[nextLineEnd] !== '\n') break;
+            let checkStart = nextLineEnd + 1;
+            while (checkStart < result.length && result[checkStart] !== '\n') checkStart++;
+            const checkLine = result.slice(nextLineEnd + 1, checkStart);
+            if (!checkLine.startsWith('|')) break;
+            nextLineEnd = checkStart;
+          }
+          end = nextLineEnd;
+        }
+      }
+    }
+
+    const block = result.slice(start, end);
+    if (!block.includes('||')) continue;
+
+    // 分离前缀文本和表格内容
+    const firstPipe = block.indexOf('|');
+    let prefix = '';
+    let tableContent = block;
+    if (firstPipe > 0) {
+      const before = block.slice(0, firstPipe);
+      if (!before.endsWith('|')) {
+        prefix = before.trim();
+        tableContent = block.slice(firstPipe);
+      }
+    }
+
+    // 去掉末尾的 ||（行终止符），同时收集后续以 | 开头的数据行
+    let trailingDataLines = '';
+    if (tableContent.trimEnd().endsWith('||')) {
+      tableContent = tableContent.trimEnd().slice(0, -2);
+      // 表头的 || 被去掉后，收集紧跟的数据行
+      let lookFrom = end;
+      while (lookFrom < result.length) {
+        if (result[lookFrom] === '\n') {
+          let lineStart = lookFrom + 1;
+          while (lineStart < result.length && result[lineStart] !== '\n') lineStart++;
+          const line = result.slice(lookFrom + 1, lineStart);
+          if (line.startsWith('|')) {
+            trailingDataLines += '\n' + line;
+            lookFrom = lineStart;
+          } else {
+            break;
+          }
+        } else {
+          break;
+        }
+      }
+    }
+
+    const fullTable = tableContent + trailingDataLines;
+    if (!fullTable.includes('||')) {
+      // 没有 || 了，用单 | 分割构建表格
+      const fixed = buildTableFromPipes(fullTable);
+      const idx = placeholders.length;
+      placeholders.push((prefix ? prefix + '\n' : '') + fixed + '\n');
+    } else {
+      const fixed = fixOneCollapsedTable(fullTable);
+      const idx = placeholders.length;
+      placeholders.push((prefix ? prefix + '\n' : '') + fixed + '\n');
+    }
+    result = result.slice(0, start) + `__TBL_${placeholders.length}__` + result.slice(end);
+  }
+
+  for (let i = placeholders.length - 1; i >= 0; i--) {
+    result = result.replace(`__TBL_${i + 1}__`, placeholders[i]);
+  }
+  return result;
+}
+
+function renderMarkdown(text: string) {
+  // 1. 保护 fenced code blocks
+  const codeBlocks: string[] = [];
+  let raw = text.replace(/```[\s\S]*?```/g, (m) => {
+    codeBlocks.push(m);
+    return `__CODE_BLOCK_${codeBlocks.length - 1}__`;
+  });
+  // 2. 保护 inline code（防止 | 被误判为表格分隔符）
+  const inlineCodes: string[] = [];
+  raw = raw.replace(/`[^`]+`/g, (m) => {
+    inlineCodes.push(m);
+    return `__INLINE_CODE_${inlineCodes.length - 1}__`;
+  });
+  // 3. 修复被 || 压缩的表格
+  raw = fixAllCollapsedTables(raw);
+  // 4. 格式修正
+  raw = raw
+    .replace(/([^\n])(#{1,6}\s)/g, '$1\n\n$2')
+    .replace(/([^\n])(```)/g, '$1\n\n$2')
+    .replace(/([^\n])(- \*\*)/g, '$1\n$2')
+    .replace(/([^\n])(\d+\.\s)/g, '$1\n$2')
+    .replace(/\n{2,}(\|)/g, '\n$1');
+  // 5. 恢复 inline code 和 fenced code blocks
+  let finalMd = raw.replace(/__INLINE_CODE_(\d+)__/g, (_, i) => inlineCodes[+i]);
+  finalMd = finalMd.replace(/__CODE_BLOCK_(\d+)__/g, (_, i) => codeBlocks[+i]);
+  const fenceCount = (finalMd.match(/```/g) || []).length;
+  if (fenceCount % 2 !== 0) finalMd += '\n```';
+  return finalMd;
+}
+
+// ── 主题变量 ──
 
 const darkVars = {
   bg: '#07070a', sidebar: 'rgba(12,12,18,0.5)', glass: 'rgba(255,255,255,0.035)',
@@ -31,8 +339,10 @@ const lightVars = {
   text: '#1a1a1e', text2: '#52525b', text3: '#8a8a96',
 };
 
+// ── 主组件 ──
+
 export default function App() {
-  const [messages, setMessages] = useState<Msg[]>([]);
+  const [messagesMap, setMessagesMap] = useState<Record<string, Msg[]>>({ default: [] });
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [isDark, setIsDark] = useState(true);
@@ -41,29 +351,53 @@ export default function App() {
   ]);
   const [activeConv, setActiveConv] = useState('default');
   const [useLangGraph, setUseLangGraph] = useState(false);
+  const [modeHint, setModeHint] = useState('');
   const idRef = useRef(0);
   const v = isDark ? darkVars : lightVars;
+
+  const messages = messagesMap[activeConv] || [];
+
+  // 模式切换提示
+  const toggleMode = useCallback(() => {
+    const next = !useLangGraph;
+    setUseLangGraph(next);
+    const currentMsgs = messagesMap[activeConv] || [];
+    if (currentMsgs.length > 0) {
+      setModeHint(next ? 'New messages will use LangGraph mode' : 'New messages will use AgentExecutor mode');
+      setTimeout(() => setModeHint(''), 3000);
+    }
+  }, [useLangGraph, messagesMap, activeConv]);
+
+  const updateMessages = useCallback((sessionId: string, updater: (prev: Msg[]) => Msg[]) => {
+    setMessagesMap(prev => ({
+      ...prev,
+      [sessionId]: updater(prev[sessionId] || []),
+    }));
+  }, []);
 
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim() || loading) return;
     setInput('');
     setLoading(true);
+    const sid = activeConv;
     const userKey = `msg-${idRef.current++}`;
     const aiKey = `msg-${idRef.current++}`;
-    setMessages(prev => [
+
+    updateMessages(sid, prev => [
       ...prev,
       { key: userKey, role: 'user', content: text, blocks: [] },
       { key: aiKey, role: 'ai', content: '', streaming: true, blocks: [] },
     ]);
     setConversations(prev =>
-      prev?.map(c => c.key === activeConv && c.label === 'New conversation'
+      prev?.map(c => c.key === sid && c.label === 'New conversation'
         ? { ...c, label: text.slice(0, 30) } : c)
     );
+
     try {
       const endpoint = useLangGraph ? '/graph_chat' : '/chat';
       const res = await fetch(`${API}${endpoint}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ message: text, session_id: sid }),
       });
       const reader = res.body!.getReader();
       const dec = new TextDecoder();
@@ -76,35 +410,28 @@ export default function App() {
         buf = parts.pop()!;
         for (const part of parts) {
           if (!part.trim()) continue;
-          const lines = part.split('\n');
-          let evtType = '', evtData = '';
-          for (const l of lines) {
-            if (l.startsWith('event: ')) evtType = l.slice(7);
-            else if (l.startsWith('data: ')) evtData = l.slice(6);
-          }
-          if (evtType === 'tool_start') {
-            const info = JSON.parse(evtData);
-            const inputStr = typeof info.input === 'object' ? JSON.stringify(info.input) : String(info.input);
-            setMessages(prev => prev.map(m => m.key === aiKey ? {
-              ...m, blocks: [...m.blocks, { type: 'tool_start', tool: info.tool, input: inputStr }],
+          const evt = parseSSEEvent(part);
+          if (!evt) continue;
+
+          if (evt.type === 'tool_start') {
+            const inputStr = typeof evt.data.input === 'object' ? JSON.stringify(evt.data.input) : String(evt.data.input);
+            updateMessages(sid, prev => prev.map(m => m.key === aiKey ? {
+              ...m, blocks: [...m.blocks, { type: 'tool_start', tool: evt.data.tool, input: inputStr }],
             } : m));
-          } else if (evtType === 'tool_end') {
-            const info = JSON.parse(evtData);
-            setMessages(prev => prev.map(m => m.key === aiKey ? {
-              ...m, blocks: [...m.blocks, { type: 'tool_end', tool: info.tool, output: info.output }],
+          } else if (evt.type === 'tool_end') {
+            updateMessages(sid, prev => prev.map(m => m.key === aiKey ? {
+              ...m, blocks: [...m.blocks, { type: 'tool_end', tool: evt.data.tool, output: evt.data.output }],
             } : m));
-          } else if (evtData && evtData !== '[DONE]') {
-            console.log('[SSE token]', JSON.stringify(evtData));
-            setMessages(prev => prev.map(m => {
+          } else if (evt.type === 'token') {
+            updateMessages(sid, prev => prev.map(m => {
               if (m.key !== aiKey) return m;
-              const newContent = m.content + evtData;
-              // 追加到最后一个 text block，或新建一个
+              const newContent = m.content + evt.data;
               const blocks = [...m.blocks];
               const last = blocks[blocks.length - 1];
               if (last && last.type === 'text') {
-                blocks[blocks.length - 1] = { ...last, text: last.text + evtData };
+                blocks[blocks.length - 1] = { ...last, text: last.text + evt.data };
               } else {
-                blocks.push({ type: 'text', text: evtData });
+                blocks.push({ type: 'text', text: evt.data });
               }
               return { ...m, content: newContent, blocks };
             }));
@@ -112,77 +439,42 @@ export default function App() {
         }
       }
     } catch (e: any) {
-      setMessages(prev => prev.map(m =>
+      updateMessages(sid, prev => prev.map(m =>
         m.key === aiKey ? { ...m, content: `Connection error: ${e.message}`, blocks: [{ type: 'text', text: `Connection error: ${e.message}` }] } : m));
     }
-    setMessages(prev => prev.map(m =>
+    updateMessages(sid, prev => prev.map(m =>
       m.key === aiKey ? { ...m, streaming: false } : m));
     setLoading(false);
-  }, [loading, activeConv, useLangGraph]);
+  }, [loading, activeConv, useLangGraph, updateMessages]);
 
   const clearChat = useCallback(async () => {
     await fetch(`${API}/clear`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: 'default' }),
+      body: JSON.stringify({ session_id: activeConv }),
     }).catch(() => {});
-    setMessages([]);
+    updateMessages(activeConv, () => []);
     setConversations(prev => prev?.map(c =>
       c.key === activeConv ? { ...c, label: 'New conversation' } : c));
-  }, [activeConv]);
+  }, [activeConv, updateMessages]);
 
-  /* ── 渲染 AI 消息的内容块 ── */
+  const newChat = useCallback(() => {
+    const key = `conv-${Date.now()}`;
+    setConversations(prev => [...(prev || []), { key, label: 'New conversation' }]);
+    setMessagesMap(prev => ({ ...prev, [key]: [] }));
+    setActiveConv(key);
+  }, []);
+
+  /* ── 渲染 AI 消息 ── */
   const renderBlocks = (msg: Msg) => (
     <div>
+      {msg.streaming && msg.blocks.length === 0 && <ThinkingIndicator v={v} />}
       {(msg.blocks || []).map((block, i) => {
         if (block.type === 'tool_start') {
-          // 找对应的 tool_end
-          const endBlock = (msg.blocks || []).slice(i + 1).find(
-            b => b.type === 'tool_end' && b.tool === block.tool
-          ) as (ContentBlock & { type: 'tool_end' }) | undefined;
-          return (
-            <details key={i} style={{
-              marginBottom: 8, padding: '8px 12px', fontSize: 12,
-              background: v.glass, border: `1px solid ${v.border}`,
-              borderRadius: 8, backdropFilter: 'blur(20px)',
-            }}>
-              <summary style={{ cursor: 'pointer', color: '#f97316', fontWeight: 600 }}>
-                🔧 调用 {block.tool} {endBlock ? '✅' : '⏳'}
-              </summary>
-              <div style={{ padding: '4px 0', color: v.text3, fontFamily: "'SF Mono',Menlo,monospace", fontSize: 11 }}>{block.input}</div>
-              {endBlock && <div style={{
-                padding: '4px 0', color: v.text2, fontSize: 11,
-                maxHeight: 80, overflow: 'auto', borderTop: `1px solid ${v.border}`, marginTop: 4,
-              }}>{endBlock.output}</div>}
-            </details>
-          );
+          return <ToolCard key={i} block={block} allBlocks={msg.blocks} index={i} v={v} />;
         }
-        if (block.type === 'tool_end') return null; // 已在 tool_start 中渲染
+        if (block.type === 'tool_end') return null;
         if (block.type === 'text') {
-          // 先把代码块提取出来保护，避免内部 # 被当标题
-          const codeBlocks: string[] = [];
-          let raw = block.text.replace(/```[\s\S]*?```/g, (m) => {
-            codeBlocks.push(m);
-            return `__CODE_BLOCK_${codeBlocks.length - 1}__`;
-          });
-          raw = raw
-            .replace(/([^\n])(#{1,6}\s)/g, '$1\n\n$2')
-            .replace(/([^\n])(```)/g, '$1\n\n$2')
-            .replace(/([^\n])(- \*\*)/g, '$1\n$2')
-            .replace(/([^\n])(\d+\.\s)/g, '$1\n$2')
-            // 表格修复：在 | 开头的单元格前插入换行
-            .replace(/ \| (?=[^|\n]*\|)/g, ' |\n| ')
-            .replace(/\| \|/g, '|\n|')
-            .replace(/\n{2,}(\|)/g, '\n$1')
-            .replace(/([^\n])(\|[-:]+)/g, '$1\n$2')
-            .replace(/([^\n])(\| )/g, '$1\n$2');
-          // 还原代码块
-          let finalMd = raw.replace(/__CODE_BLOCK_(\d+)__/g, (_, i) => codeBlocks[+i]);
-          // 流式过程中代码块可能未闭合，补上 ```
-          const fenceCount = (finalMd.match(/```/g) || []).length;
-          if (fenceCount % 2 !== 0) finalMd += '\n```';
-          const md = finalMd;
-          console.log('[Markdown raw]', JSON.stringify(block.text.slice(0, 300)));
-          console.log('[Markdown processed]', JSON.stringify(md.slice(0, 300)));
+          const md = renderMarkdown(block.text);
           return <XMarkdown key={i}>{md}</XMarkdown>;
         }
         return null;
@@ -224,9 +516,6 @@ export default function App() {
       <AntApp>
         <style>{`
           @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-          @keyframes float16 { to { transform: translate(60px, 40px) } }
-          @keyframes float14 { to { transform: translate(-50px, -30px) } }
-          @keyframes float18 { to { transform: translate(-30px, 50px) } }
           body { background: ${v.bg} !important; transition: background 0.3s; }
           .ant-conversations .ant-conversations-item { border-radius: 10px !important; }
           .ant-sender { border-radius: 12px !important; backdrop-filter: blur(40px) saturate(1.4); box-shadow: 0 4px 30px ${isDark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.06)'}; transition: all 0.3s !important; }
@@ -257,7 +546,7 @@ export default function App() {
                 DeepSeek Chat
               </div>
             </div>
-            <button onClick={clearChat} style={{
+            <button onClick={newChat} style={{
               margin: '6px 12px 4px', padding: '9px 0', fontSize: 13, fontFamily: 'inherit',
               background: v.glass, border: `1px solid ${v.border}`, borderRadius: 10,
               color: v.text2, cursor: 'pointer', WebkitAppRegion: 'no-drag' as any,
@@ -296,7 +585,7 @@ export default function App() {
                 {conversations?.find(c => c.key === activeConv)?.label}
               </span>
               <span style={{ flex: 1 }} />
-              <button onClick={() => setUseLangGraph(!useLangGraph)} style={{
+              <button onClick={toggleMode} style={{
                 fontSize: 11, padding: '5px 12px', borderRadius: 8, cursor: 'pointer',
                 background: useLangGraph ? 'rgba(249,115,22,0.15)' : v.glass,
                 border: `1px solid ${useLangGraph ? 'rgba(249,115,22,0.3)' : v.border}`,
@@ -337,13 +626,21 @@ export default function App() {
                   items={messages.map(m => ({
                     key: m.key,
                     role: m.role,
-                    content: m.role === 'user' ? m.content : ((m.blocks?.length ?? 0) > 0 ? m.content : ''),
+                    content: m.role === 'user' ? m.content : ((m.blocks?.length ?? 0) > 0 || m.streaming ? m.content : ''),
                     streaming: m.streaming,
                     loading: m.role === 'ai' && m.streaming && (m.blocks?.length ?? 0) === 0,
                   }))}
                 />
               )}
             </div>
+
+            {/* 模式切换提示 */}
+            {modeHint && (
+              <div style={{
+                textAlign: 'center', fontSize: 12, color: '#f97316', padding: '4px 0',
+                background: 'rgba(249,115,22,0.06)',
+              }}>{modeHint}</div>
+            )}
 
             {/* 输入框 */}
             <div style={{ padding: '0 24px 24px', flexShrink: 0 }}>

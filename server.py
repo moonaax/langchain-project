@@ -56,7 +56,11 @@ prompt = ChatPromptTemplate.from_messages([
 
 格式要求：
 - 输出 Markdown 时，每个标题（#）前必须有空行
-- 表格每行必须独占一行，表头、分隔行、数据行之间不能有空行
+- 表格必须严格按以下格式，每行独占一行，行与行之间不能合并到同一行：
+  | 列1 | 列2 |
+  |------|------|
+  | 值1 | 值2 |
+  错误示范：| 列1 | 列2 | 值1 | 值2 | （所有内容不能在同一行）
 - 代码块必须用 ``` 包裹，不要省略"""),
     MessagesPlaceholder(variable_name="history"),
     ("human", "{input}"),
