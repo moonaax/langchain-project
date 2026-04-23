@@ -40,6 +40,7 @@ export default function App() {
     { key: 'default', label: 'New conversation' },
   ]);
   const [activeConv, setActiveConv] = useState('default');
+  const [useLangGraph, setUseLangGraph] = useState(false);
   const idRef = useRef(0);
   const v = isDark ? darkVars : lightVars;
 
@@ -59,7 +60,8 @@ export default function App() {
         ? { ...c, label: text.slice(0, 30) } : c)
     );
     try {
-      const res = await fetch(`${API}/chat`, {
+      const endpoint = useLangGraph ? '/graph_chat' : '/chat';
+      const res = await fetch(`${API}${endpoint}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text }),
       });
@@ -116,7 +118,7 @@ export default function App() {
     setMessages(prev => prev.map(m =>
       m.key === aiKey ? { ...m, streaming: false } : m));
     setLoading(false);
-  }, [loading, activeConv]);
+  }, [loading, activeConv, useLangGraph]);
 
   const clearChat = useCallback(async () => {
     await fetch(`${API}/clear`, {
@@ -269,7 +271,7 @@ export default function App() {
             }}>
               <span style={{ fontSize: 11, color: v.text3, display: 'flex', alignItems: 'center', gap: 7 }}>
                 <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 8px rgba(34,197,94,0.6)' }} />
-                deepseek-chat
+                {useLangGraph ? 'LangGraph' : 'AgentExecutor'}
               </span>
               <button onClick={() => setIsDark(!isDark)} style={{
                 width: 30, height: 30, borderRadius: 8, fontSize: 14, cursor: 'pointer',
@@ -294,6 +296,14 @@ export default function App() {
                 {conversations?.find(c => c.key === activeConv)?.label}
               </span>
               <span style={{ flex: 1 }} />
+              <button onClick={() => setUseLangGraph(!useLangGraph)} style={{
+                fontSize: 11, padding: '5px 12px', borderRadius: 8, cursor: 'pointer',
+                background: useLangGraph ? 'rgba(249,115,22,0.15)' : v.glass,
+                border: `1px solid ${useLangGraph ? 'rgba(249,115,22,0.3)' : v.border}`,
+                color: useLangGraph ? '#f97316' : v.text3,
+                fontFamily: 'inherit', WebkitAppRegion: 'no-drag' as any,
+                transition: 'all 0.2s',
+              }}>{useLangGraph ? '🔗 LangGraph' : '⚡ Agent'}</button>
               <button onClick={clearChat} style={{
                 fontSize: 11, padding: '5px 12px', borderRadius: 8, cursor: 'pointer',
                 background: v.glass, border: `1px solid ${v.border}`, color: v.text3,
@@ -315,7 +325,9 @@ export default function App() {
                     boxShadow: '0 0 50px rgba(249,115,22,0.3), 0 0 100px rgba(249,115,22,0.1)',
                   }}>⚡</div>
                   <div style={{ fontSize: 22, fontWeight: 700, color: v.text }}>What can I help with?</div>
-                  <div style={{ fontSize: 13, color: v.text3 }}>Powered by LangChain + DeepSeek</div>
+                  <div style={{ fontSize: 13, color: v.text3 }}>
+                    {useLangGraph ? '🔗 LangGraph ReAct Mode' : '⚡ AgentExecutor Mode'} · Powered by DeepSeek
+                  </div>
                 </div>
               ) : (
                 <Bubble.List

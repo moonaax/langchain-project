@@ -1,10 +1,12 @@
 """
-FastAPI 后端：LangChain + DeepSeek 工具调用 Agent API
+FastAPI 后端：LangChain + DeepSeek Agent API
 
 第三阶段：新增知识库 RAG 检索工具
+第四阶段：新增 LangGraph ReAct Agent 端点
 
 AI Agent 知识点索引：
-- Agent API: AgentExecutor + astream_events 流式推送
+- Agent API: AgentExecutor + astream_events 流式推送（旧）
+- LangGraph: StateGraph + ToolNode + 条件路由（新）
 - RAG Tool: knowledge_search 工具，Agent 自主决定是否检索
 - SSE 协议: tool_start / tool_end / token / done 事件类型
 """
@@ -17,10 +19,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
+from langgraph.graph import StateGraph, START, END, MessagesState
+from langgraph.prebuilt import ToolNode
+from langgraph.checkpoint.memory import MemorySaver
 from tools import all_tools
 
 load_dotenv()
@@ -75,6 +81,38 @@ agent_with_memory = RunnableWithMessageHistory(
     input_messages_key="input", history_messages_key="history",
 )
 
+# ============================================================
+# 【知识点】第四阶段 — LangGraph ReAct Agent
+# ============================================================
+# 用 LangGraph 手动构建 ReAct 图，替代 AgentExecutor 黑盒模式
+# 图结构：START → agent → ┬── 有 tool_calls → tools → agent（循环）
+#                         └── 无 tool_calls → END
+
+llm_with_tools = llm.bind_tools(all_tools)
+tool_node = ToolNode(all_tools)
+
+def graph_agent_node(state: MessagesState) -> dict:
+    """LLM 推理节点"""
+    response = llm_with_tools.invoke(state["messages"])
+    return {"messages": [response]}
+
+def should_continue(state: MessagesState) -> str:
+    """条件路由：有 tool_calls → tools，否则 END"""
+    last_msg = state["messages"][-1]
+    if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+        return "tools"
+    return END
+
+graph = StateGraph(MessagesState)
+graph.add_node("agent", graph_agent_node)
+graph.add_node("tools", tool_node)
+graph.add_edge(START, "agent")
+graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+graph.add_edge("tools", "agent")
+
+graph_memory = MemorySaver()
+graph_app = graph.compile(checkpointer=graph_memory)
+
 class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
@@ -106,9 +144,12 @@ async def chat(req: ChatRequest):
 
             elif kind == "on_tool_end":
                 in_tool = False
+                output = event["data"].get("output", "")
+                if not isinstance(output, str):
+                    output = str(output)
                 payload = json.dumps({
                     "tool": event["name"],
-                    "output": event["data"].get("output", ""),
+                    "output": output,
                 }, ensure_ascii=False)
                 yield f"event: tool_end\ndata: {payload}\n\n"
 
@@ -122,7 +163,52 @@ async def chat(req: ChatRequest):
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
+# ============================================================
+# 【知识点】第四阶段 — LangGraph 流式端点
+# ============================================================
+# 用 graph_app.astream_events 推流，与 AgentExecutor 端点协议一致
+@app.post("/graph_chat")
+async def graph_chat(req: ChatRequest):
+    config = {"configurable": {"thread_id": req.session_id}}
+
+    async def generate():
+        in_tool = False
+        async for event in graph_app.astream_events(
+            {"messages": [HumanMessage(content=req.message)]},
+            config=config, version="v2",
+        ):
+            kind = event["event"]
+
+            if kind == "on_tool_start":
+                in_tool = True
+                payload = json.dumps({
+                    "tool": event["name"],
+                    "input": event["data"].get("input", {}),
+                }, ensure_ascii=False)
+                yield f"event: tool_start\ndata: {payload}\n\n"
+
+            elif kind == "on_tool_end":
+                in_tool = False
+                output = event["data"].get("output", "")
+                if not isinstance(output, str):
+                    output = str(output)
+                payload = json.dumps({
+                    "tool": event["name"],
+                    "output": output,
+                }, ensure_ascii=False)
+                yield f"event: tool_end\ndata: {payload}\n\n"
+
+            elif kind == "on_chat_model_stream" and not in_tool:
+                chunk = event["data"].get("chunk")
+                if chunk and chunk.content and isinstance(chunk.content, str):
+                    yield f"data: {chunk.content}\n\n"
+
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
 @app.post("/clear")
 async def clear(req: ClearRequest):
     store.pop(req.session_id, None)
+    graph_memory.delete_thread(req.session_id)
     return {"status": "ok"}
