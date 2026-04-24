@@ -493,18 +493,162 @@ def run_plan_execute():
             print(f"\n❌ 错误: {e}\n")
 
 
+def run_human_loop():
+    """人机协作模式（第四阶段进阶）"""
+    from typing import TypedDict, Annotated
+    from operator import add
+    from langgraph.graph import StateGraph, START, END
+    from langgraph.prebuilt import ToolNode
+    from langgraph.checkpoint.memory import MemorySaver
+    from langchain_core.messages import SystemMessage, ToolMessage, BaseMessage
+
+    llm_with_tools = llm.bind_tools(all_tools)
+    tool_node = ToolNode(all_tools)
+    MAX_RETRIES = 3
+
+    # ============================================================
+    # 【知识点】人机协作 State — 与 ReAct 相同
+    # ============================================================
+    class AgentState(TypedDict):
+        messages: Annotated[list[BaseMessage], add]
+        retry_count: int
+        last_error: str
+
+    def agent_node(state: AgentState) -> dict:
+        response = llm_with_tools.invoke(state["messages"])
+        return {"messages": [response]}
+
+    def should_continue(state: AgentState) -> str:
+        last_msg = state["messages"][-1]
+        if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+            return "tools"
+        return END
+
+    def check_tool_result(state: AgentState) -> str:
+        last_msg = state["messages"][-1]
+        content = last_msg.content if hasattr(last_msg, "content") else ""
+        retry_count = state.get("retry_count", 0)
+        is_error = any(kw in content for kw in ["错误", "error", "未找到", "失败", "无法"])
+        if is_error and retry_count < MAX_RETRIES:
+            return "corrector"
+        return "agent"
+
+    def corrector_node(state: AgentState) -> dict:
+        last_error = state["messages"][-1].content
+        retry_count = state.get("retry_count", 0) + 1
+        correction_prompt = f"""⚠️ 工具调用失败（第 {retry_count} 次重试）：
+{last_error}
+
+请分析失败原因并换一种方式尝试：
+- 如果是参数错误，请修正参数后重试
+- 如果是工具选择错误，请换一个更合适的工具
+- 如果所有工具都无法解决，请直接用你的知识回答，并说明工具不可用"""
+        return {
+            "messages": [SystemMessage(content=correction_prompt)],
+            "retry_count": retry_count,
+            "last_error": last_error,
+        }
+
+    # ============================================================
+    # 【知识点】StateGraph 构建 — 带 interrupt_before 的图
+    # ============================================================
+    # 图结构与 ReAct 相同，但在 tools 节点前暂停
+    # interrupt_before=["tools"] 表示在执行 tools 节点前暂停图
+    graph = StateGraph(AgentState)
+    graph.add_node("agent", agent_node)
+    graph.add_node("tools", tool_node)
+    graph.add_node("corrector", corrector_node)
+    graph.add_edge(START, "agent")
+    graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    graph.add_conditional_edges("tools", check_tool_result, {"corrector": "corrector", "agent": "agent"})
+    graph.add_edge("corrector", "agent")
+
+    memory = MemorySaver()
+    app = graph.compile(
+        checkpointer=memory,
+        interrupt_before=["tools"],  # 在 tools 节点前暂停
+    )
+
+    session_id = "human"
+    config = {"configurable": {"thread_id": session_id}}
+
+    print("🤖 DeepSeek Agent — 人机协作模式（输入 quit 退出，输入 clear 清空历史）")
+    print("🔧 可用工具: 数学计算 | 当前时间 | 天气查询 | 📚 知识库检索")
+    print("📊 执行模式: 工具调用前暂停等你确认\n")
+
+    while True:
+        user_input = input("你: ").strip()
+        if not user_input:
+            continue
+        if user_input.lower() == "quit":
+            print("再见！")
+            break
+        if user_input.lower() == "clear":
+            memory.delete_thread(session_id)
+            print("✅ 对话历史已清空\n")
+            continue
+
+        try:
+            # 第一次运行，可能在 tools 节点前暂停
+            result = app.invoke(
+                {"messages": [HumanMessage(content=user_input)], "retry_count": 0, "last_error": ""},
+                config=config,
+            )
+
+            # 检查是否暂停在 tools 节点
+            snapshot = app.get_state(config)
+            if snapshot.next and "tools" in snapshot.next:
+                # 提取待执行的 tool_calls
+                last_msg = snapshot.values["messages"][-1]
+                if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+                    print("\n⏸️  Agent 想调用以下工具：")
+                    for tc in last_msg.tool_calls:
+                        print(f"   🔧 {tc['name']}({tc['args']})")
+
+                    confirm = input("\n确认执行？(y/n): ").strip().lower()
+                    if confirm == "y":
+                        print("✅ 已确认，继续执行...\n")
+                        result = app.invoke(None, config=config)
+                        ai_msg = result["messages"][-1]
+                        print(f"\nAI: {ai_msg.content}\n")
+                    else:
+                        print("❌ 已取消，Agent 将换一种方式回答...\n")
+                        rejection_msgs = []
+                        for tc in last_msg.tool_calls:
+                            rejection_msgs.append(ToolMessage(
+                                content="用户拒绝了此工具调用。请直接用你的知识回答用户的问题，不要尝试调用任何工具。",
+                                tool_call_id=tc["id"],
+                            ))
+                        app.update_state(config, {"messages": rejection_msgs})
+                        result = app.invoke(None, config=config)
+                        ai_msg = result["messages"][-1]
+                        print(f"\nAI: {ai_msg.content}\n")
+                else:
+                    ai_msg = result["messages"][-1]
+                    print(f"\nAI: {ai_msg.content}\n")
+            else:
+                ai_msg = result["messages"][-1]
+                print(f"\nAI: {ai_msg.content}\n")
+
+        except Exception as e:
+            print(f"\n❌ 错误: {e}\n")
+
+
 def main():
     print("🤖 DeepSeek Agent 终端版\n")
     print("选择执行模式：")
     print("  1. AgentExecutor（第三阶段，黑盒循环）")
     print("  2. LangGraph ReAct + 自纠错（第四阶段进阶）")
-    print("  3. Plan-and-Execute（第四阶段进阶，先规划再执行）\n")
+    print("  3. Plan-and-Execute（第四阶段进阶，先规划再执行）")
+    print("  4. 人机协作（第四阶段进阶，工具调用前暂停等你确认）\n")
 
-    choice = input("请输入 1、2 或 3: ").strip()
+    choice = input("请输入 1、2、3 或 4: ").strip()
     if choice == "2":
         run_langgraph_agent()
     elif choice == "3":
         run_plan_execute()
+    elif choice == "4":
+        run_human_loop()
     else:
         run_agent_executor()
 

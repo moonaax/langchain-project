@@ -5,6 +5,7 @@ LangGraph Agent（终端版）
 第四阶段进阶：
   - 自纠错循环：工具失败时自动注入提示，引导 LLM 换策略重试
   - Plan-and-Execute：先规划再执行，提高复杂任务成功率
+  - 人机协作：关键操作前暂停等用户确认（interrupt_before）
 
 AI Agent 知识点索引：
 - LangGraph: StateGraph、Node、Edge、条件路由
@@ -13,6 +14,7 @@ AI Agent 知识点索引：
 - MemorySaver: 内存检查点，支持多轮对话持久化
 - 自纠错: 扩展 State 追踪重试次数，工具失败后路由到 corrector 节点注入提示
 - Plan-and-Execute: planner 规划步骤 → executor 逐步执行 → re-planner 动态调整
+- 人机协作: interrupt_before 暂停图执行，等待用户确认后 resume
 """
 
 import os
@@ -426,6 +428,49 @@ plan_app = plan_graph.compile(checkpointer=plan_memory)
 
 # ============================================================
 # ============================================================
+#  模式三：人机协作（interrupt_before）
+# ============================================================
+# ============================================================
+
+# ============================================================
+# 【知识点】人机协作 — interrupt_before 暂停图执行
+# ============================================================
+# 核心思想：Agent 要调用工具时，图暂停，等用户确认后才执行
+#
+# 执行流程：
+#   1. 用户提问 → agent 推理 → 决定调用工具
+#   2. 图在 tools 节点前暂停（interrupt_before）
+#   3. 返回暂停状态：包含待执行的 tool_calls
+#   4. 用户确认 → resume 继续执行工具
+#   5. 用户取消 → 注入拒绝消息，agent 换策略
+#
+# 关键 API：
+#   graph.compile(interrupt_before=["tools"])  — 编译时声明暂停点
+#   app.invoke(None, config)                   — resume 继续执行
+#   app.get_state(config)                      — 获取当前暂停状态
+
+# 复用 AgentState、agent_node、should_continue、corrector_node 等已有定义
+human_graph = StateGraph(AgentState)
+
+human_graph.add_node("agent", agent_node)
+human_graph.add_node("tools", tool_node)
+human_graph.add_node("corrector", corrector_node)
+
+human_graph.add_edge(START, "agent")
+human_graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+human_graph.add_conditional_edges("tools", check_tool_result, {"corrector": "corrector", "agent": "agent"})
+human_graph.add_edge("corrector", "agent")
+
+human_memory = MemorySaver()
+# 【知识点】interrupt_before — 在 tools 节点前暂停，等待用户确认
+human_app = human_graph.compile(
+    checkpointer=human_memory,
+    interrupt_before=["tools"],
+)
+
+
+# ============================================================
+# ============================================================
 #  终端入口
 # ============================================================
 # ============================================================
@@ -488,16 +533,89 @@ def run_plan_execute():
             print(f"\n❌ 错误: {e}\n")
 
 
+def run_human_loop():
+    """模式三：人机协作（interrupt_before）"""
+    session_id = "human"
+    config = {"configurable": {"thread_id": session_id}}
+
+    print("📊 执行模式: 人机协作（工具调用前暂停等你确认）\n")
+
+    while True:
+        user_input = input("你: ").strip()
+        if not user_input:
+            continue
+        if user_input.lower() == "quit":
+            return
+        if user_input.lower() == "clear":
+            human_memory.delete_thread(session_id)
+            print("✅ 对话历史已清空\n")
+            continue
+
+        try:
+            # 第一次运行，可能在 tools 节点前暂停
+            result = human_app.invoke(
+                {"messages": [HumanMessage(content=user_input)], "retry_count": 0, "last_error": ""},
+                config=config,
+            )
+
+            # 检查是否暂停在 tools 节点
+            snapshot = human_app.get_state(config)
+            if snapshot.next and "tools" in snapshot.next:
+                # 提取待执行的 tool_calls
+                last_msg = snapshot.values["messages"][-1]
+                if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+                    print("\n⏸️  Agent 想调用以下工具：")
+                    for tc in last_msg.tool_calls:
+                        print(f"   🔧 {tc['name']}({tc['args']})")
+
+                    confirm = input("\n确认执行？(y/n): ").strip().lower()
+                    if confirm == "y":
+                        print("✅ 已确认，继续执行...\n")
+                        # resume：继续执行
+                        result = human_app.invoke(None, config=config)
+                        ai_msg = result["messages"][-1]
+                        print(f"\nAI: {ai_msg.content}\n")
+                    else:
+                        print("❌ 已取消，Agent 将换一种方式回答...\n")
+                        # 注入拒绝消息，让 agent 知道工具被拒绝了
+                        from langchain_core.messages import ToolMessage
+                        rejection_msgs = []
+                        for tc in last_msg.tool_calls:
+                            rejection_msgs.append(ToolMessage(
+                                content="用户拒绝了此工具调用。请直接用你的知识回答用户的问题，不要尝试调用任何工具。",
+                                tool_call_id=tc["id"],
+                            ))
+                        human_app.update_state(config, {"messages": rejection_msgs})
+                        # resume：agent 会收到拒绝消息，换策略回答
+                        result = human_app.invoke(None, config=config)
+                        ai_msg = result["messages"][-1]
+                        print(f"\nAI: {ai_msg.content}\n")
+                else:
+                    # 没有 tool_calls，直接输出
+                    ai_msg = result["messages"][-1]
+                    print(f"\nAI: {ai_msg.content}\n")
+            else:
+                # 没有暂停，直接输出
+                ai_msg = result["messages"][-1]
+                print(f"\nAI: {ai_msg.content}\n")
+
+        except Exception as e:
+            print(f"\n❌ 错误: {e}\n")
+
+
 def main():
     print("🤖 DeepSeek LangGraph Agent（输入 quit 退出，输入 clear 清空历史）")
     print("🔧 可用工具: 数学计算 | 当前时间 | 天气查询 | 📚 知识库检索\n")
     print("选择执行模式：")
     print("  1. ReAct + 自纠错（工具调用循环，失败自动重试）")
-    print("  2. Plan-and-Execute（先规划步骤，再逐步执行）\n")
+    print("  2. Plan-and-Execute（先规划步骤，再逐步执行）")
+    print("  3. 人机协作（工具调用前暂停等你确认）\n")
 
-    choice = input("请输入 1 或 2: ").strip()
+    choice = input("请输入 1、2 或 3: ").strip()
     if choice == "2":
         run_plan_execute()
+    elif choice == "3":
+        run_human_loop()
     else:
         run_react()
 

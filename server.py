@@ -367,6 +367,30 @@ plan_graph.add_edge("finish", END)
 plan_memory = MemorySaver()
 plan_app = plan_graph.compile(checkpointer=plan_memory)
 
+# ============================================================
+# 【知识点】第四阶段进阶 — 人机协作图（interrupt_before）
+# ============================================================
+# 图结构与 ReAct 相同，但在 tools 节点前暂停，等用户确认后才执行
+# 关键 API：
+#   interrupt_before=["tools"]  — 编译时声明暂停点
+#   app.invoke(None, config)    — resume 继续执行
+#   app.get_state(config)       — 获取当前暂停状态（含待执行的 tool_calls）
+
+human_graph = StateGraph(AgentState)
+human_graph.add_node("agent", graph_agent_node)
+human_graph.add_node("tools", tool_node)
+human_graph.add_node("corrector", corrector_node)
+human_graph.add_edge(START, "agent")
+human_graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+human_graph.add_conditional_edges("tools", check_tool_result, {"corrector": "corrector", "agent": "agent"})
+human_graph.add_edge("corrector", "agent")
+
+human_memory = MemorySaver()
+human_app = human_graph.compile(
+    checkpointer=human_memory,
+    interrupt_before=["tools"],
+)
+
 class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
@@ -531,9 +555,79 @@ async def plan_chat(req: ChatRequest):
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
+# ============================================================
+# 【知识点】第四阶段进阶 — 人机协作端点
+# ============================================================
+# 人机协作流程：
+#   1. /human_chat: 发送消息，Agent 推理后可能暂停在 tools 节点
+#   2. 如果暂停：返回 confirm_required 事件，包含待执行的 tool_calls
+#   3. /human_confirm: 用户确认或取消
+#      - confirm=true: resume 继续执行工具
+#      - confirm=false: 注入拒绝消息，Agent 换策略
+class ConfirmRequest(BaseModel):
+    session_id: str = "default"
+    confirm: bool
+
+@app.post("/human_chat")
+async def human_chat(req: ChatRequest):
+    config = {"configurable": {"thread_id": f"human_{req.session_id}"}}
+
+    # 第一次运行，可能在 tools 节点前暂停
+    result = human_app.invoke(
+        {"messages": [HumanMessage(content=req.message)], "retry_count": 0, "last_error": ""},
+        config=config,
+    )
+
+    # 检查是否暂停在 tools 节点
+    snapshot = human_app.get_state(config)
+    if snapshot.next and "tools" in snapshot.next:
+        # 提取待执行的 tool_calls
+        last_msg = snapshot.values["messages"][-1]
+        if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+            tool_calls = [{
+                "id": tc["id"],
+                "name": tc["name"],
+                "args": tc["args"],
+            } for tc in last_msg.tool_calls]
+            return {
+                "status": "confirm_required",
+                "tool_calls": tool_calls,
+                "session_id": req.session_id,
+            }
+
+    # 没有暂停，直接返回最终回答
+    ai_msg = result["messages"][-1]
+    return {"status": "done", "content": ai_msg.content}
+
+@app.post("/human_confirm")
+async def human_confirm(req: ConfirmRequest):
+    config = {"configurable": {"thread_id": f"human_{req.session_id}"}}
+
+    if req.confirm:
+        # 确认：resume 继续执行工具
+        result = human_app.invoke(None, config=config)
+    else:
+        # 取消：注入拒绝消息，让 agent 换策略
+        snapshot = human_app.get_state(config)
+        last_msg = snapshot.values["messages"][-1]
+        from langchain_core.messages import ToolMessage
+        rejection_msgs = []
+        if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+            for tc in last_msg.tool_calls:
+                rejection_msgs.append(ToolMessage(
+                    content="用户拒绝了此工具调用。请直接用你的知识回答用户的问题，不要尝试调用任何工具。",
+                    tool_call_id=tc["id"],
+                ))
+        human_app.update_state(config, {"messages": rejection_msgs})
+        result = human_app.invoke(None, config=config)
+
+    ai_msg = result["messages"][-1]
+    return {"status": "done", "content": ai_msg.content}
+
 @app.post("/clear")
 async def clear(req: ClearRequest):
     store.pop(req.session_id, None)
     graph_memory.delete_thread(req.session_id)
     plan_memory.delete_thread(req.session_id)
+    human_memory.delete_thread(req.session_id)
     return {"status": "ok"}

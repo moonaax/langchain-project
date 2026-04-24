@@ -14,7 +14,8 @@ type ContentBlock =
   | { type: 'tool_end'; tool: string; output: string }
   | { type: 'tool_retry'; message: string }
   | { type: 'plan_start'; plan: string[] }
-  | { type: 'plan_step'; step: number; description: string; result: string };
+  | { type: 'plan_step'; step: number; description: string; result: string }
+  | { type: 'confirm_required'; toolCalls: Array<{ id: string; name: string; args: any }> };
 
 interface Msg {
   key: string;
@@ -273,6 +274,102 @@ function PlanStepCard({ block, v }: {
   );
 }
 
+// ── 工具确认卡片 ──
+// 人机协作模式：暂停等待用户确认工具调用
+// 显示工具名称和参数，提供"执行"和"取消"按钮
+
+function ToolConfirmCard({ block, onConfirm, onCancel, v }: {
+  block: ContentBlock & { type: 'confirm_required' };
+  onConfirm: () => void;
+  onCancel: () => void;
+  v: typeof darkVars;
+}) {
+  const [confirming, setConfirming] = useState(false);
+
+  const handleConfirm = async () => {
+    setConfirming(true);
+    await onConfirm();
+  };
+
+  const handleCancel = async () => {
+    setConfirming(true);
+    await onCancel();
+  };
+
+  return (
+    <div style={{
+      margin: '6px 0', borderRadius: 10, fontSize: 12, overflow: 'hidden',
+      background: 'rgba(234,179,8,0.06)', border: '1px solid rgba(234,179,8,0.2)',
+      backdropFilter: 'blur(20px)',
+    }}>
+      {/* Header */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '8px 12px',
+        background: 'rgba(234,179,8,0.04)',
+      }}>
+        <span style={{ fontSize: 14 }}>⏸️</span>
+        <span style={{ fontWeight: 600, color: '#eab308' }}>等待确认</span>
+        <span style={{ color: v.text2, marginLeft: 4 }}>
+          Agent 想调用 {block.toolCalls.length} 个工具，请确认是否执行
+        </span>
+      </div>
+
+      {/* Tool calls list */}
+      <div style={{ borderTop: `1px solid ${v.border}` }}>
+        {block.toolCalls.map((tc, i) => (
+          <div key={i} style={{
+            padding: '8px 12px',
+            borderBottom: i < block.toolCalls.length - 1 ? `1px solid ${v.border}` : 'none',
+          }}>
+            <div style={{ fontWeight: 600, color: v.text, marginBottom: 4 }}>
+              🔧 {tc.name}
+            </div>
+            <div style={{
+              fontFamily: "'SF Mono',Menlo,monospace", fontSize: 11, color: v.text2,
+              whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+              padding: '4px 8px', background: 'rgba(0,0,0,0.08)', borderRadius: 6,
+            }}>
+              {typeof tc.args === 'object' ? JSON.stringify(tc.args, null, 2) : String(tc.args)}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Action buttons */}
+      <div style={{
+        padding: '10px 12px', display: 'flex', gap: 8, justifyContent: 'flex-end',
+        borderTop: `1px solid ${v.border}`,
+      }}>
+        <button
+          onClick={handleCancel}
+          disabled={confirming}
+          style={{
+            padding: '6px 16px', borderRadius: 8, fontSize: 12, fontWeight: 500,
+            cursor: confirming ? 'not-allowed' : 'pointer', opacity: confirming ? 0.5 : 1,
+            background: v.glass, border: `1px solid ${v.border}`, color: v.text2,
+            fontFamily: 'inherit', transition: 'all 0.2s',
+          }}
+        >
+          ✖ 拒绝执行
+        </button>
+        <button
+          onClick={handleConfirm}
+          disabled={confirming}
+          style={{
+            padding: '6px 16px', borderRadius: 8, fontSize: 12, fontWeight: 500,
+            cursor: confirming ? 'not-allowed' : 'pointer', opacity: confirming ? 0.5 : 1,
+            background: 'rgba(34,197,94,0.15)', border: '1px solid rgba(34,197,94,0.3)',
+            color: '#22c55e', fontFamily: 'inherit', transition: 'all 0.2s',
+          }}
+        >
+          ✓ 批准执行
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Markdown 渲染 ──
 
 // 修复一个被 || 压缩的表格段
@@ -488,18 +585,18 @@ export default function App() {
     { key: 'default', label: 'New conversation' },
   ]);
   const [activeConv, setActiveConv] = useState('default');
-  // 模式：agent / graph / plan
-  const [mode, setMode] = useState<'agent' | 'graph' | 'plan'>('agent');
+  // 模式：agent / graph / plan / human
+  const [mode, setMode] = useState<'agent' | 'graph' | 'plan' | 'human'>('agent');
   const [modeHint, setModeHint] = useState('');
   const idRef = useRef(0);
   const v = isDark ? darkVars : lightVars;
 
   const messages = messagesMap[activeConv] || [];
 
-  // 模式切换（三档循环：agent → graph → plan → agent）
+  // 模式切换（四档循环：agent → graph → plan → human → agent）
   const toggleMode = useCallback(() => {
-    const modes: Array<'agent' | 'graph' | 'plan'> = ['agent', 'graph', 'plan'];
-    const labels = { agent: 'AgentExecutor', graph: 'LangGraph + 自纠错', plan: 'Plan-and-Execute' };
+    const modes: Array<'agent' | 'graph' | 'plan' | 'human'> = ['agent', 'graph', 'plan', 'human'];
+    const labels = { agent: 'AgentExecutor', graph: 'LangGraph + 自纠错', plan: 'Plan-and-Execute', human: '人机协作' };
     const idx = modes.indexOf(mode);
     const next = modes[(idx + 1) % modes.length];
     setMode(next);
@@ -536,12 +633,34 @@ export default function App() {
     );
 
     try {
-      const endpointMap = { agent: '/chat', graph: '/graph_chat', plan: '/plan_chat' };
+      const endpointMap = { agent: '/chat', graph: '/graph_chat', plan: '/plan_chat', human: '/human_chat' };
       const endpoint = endpointMap[mode];
       const res = await fetch(`${API}${endpoint}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text, session_id: sid }),
       });
+
+      // 人机协作模式：非 SSE，直接返回 JSON
+      if (mode === 'human') {
+        const data = await res.json();
+        if (data.status === 'confirm_required') {
+          // 需要用户确认
+          updateMessages(sid, prev => prev.map(m => m.key === aiKey ? {
+            ...m, streaming: false,
+            blocks: [{ type: 'confirm_required', toolCalls: data.tool_calls }],
+          } : m));
+        } else {
+          // 直接返回最终回答
+          updateMessages(sid, prev => prev.map(m => m.key === aiKey ? {
+            ...m, content: data.content, streaming: false,
+            blocks: [{ type: 'text', text: data.content }],
+          } : m));
+        }
+        setLoading(false);
+        return;
+      }
+
+      // 其他模式：SSE 流式
       const reader = res.body!.getReader();
       const dec = new TextDecoder();
       let buf = '';
@@ -619,8 +738,31 @@ export default function App() {
     setActiveConv(key);
   }, []);
 
+  /* ── 工具确认回调 ── */
+  // 调用 /human_confirm 接口，confirm=true 执行工具，confirm=false 拒绝
+  const handleToolConfirm = useCallback(async (confirm: boolean, sessionId: string, aiKey: string) => {
+    setLoading(true);
+    try {
+      const res = await fetch(`${API}/human_confirm`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, confirm }),
+      });
+      const data = await res.json();
+      updateMessages(sessionId, prev => prev.map(m => m.key === aiKey ? {
+        ...m, streaming: false,
+        blocks: [{ type: 'text', text: data.content }],
+      } : m));
+    } catch (e: any) {
+      updateMessages(sessionId, prev => prev.map(m => m.key === aiKey ? {
+        ...m, streaming: false,
+        blocks: [{ type: 'text', text: `Error: ${e.message}` }],
+      } : m));
+    }
+    setLoading(false);
+  }, [updateMessages]);
+
   /* ── 渲染 AI 消息 ── */
-  const renderBlocks = (msg: Msg) => (
+  const renderBlocks = (msg: Msg, sessionId: string) => (
     <div>
       {msg.streaming && msg.blocks.length === 0 && <ThinkingIndicator v={v} />}
       {(msg.blocks || []).map((block, i) => {
@@ -636,6 +778,17 @@ export default function App() {
         }
         if (block.type === 'plan_step') {
           return <PlanStepCard key={i} block={block} v={v} />;
+        }
+        if (block.type === 'confirm_required') {
+          return (
+            <ToolConfirmCard
+              key={i}
+              block={block}
+              onConfirm={() => handleToolConfirm(true, sessionId, msg.key)}
+              onCancel={() => handleToolConfirm(false, sessionId, msg.key)}
+              v={v}
+            />
+          );
         }
         if (block.type === 'text') {
           const md = renderMarkdown(block.text);
@@ -662,7 +815,7 @@ export default function App() {
       contentRender: (_, info) => {
         const msg = messages.find(m => m.key === info?.key);
         if (!msg) return null;
-        return renderBlocks(msg);
+        return renderBlocks(msg, activeConv);
       },
     },
   };
@@ -724,7 +877,7 @@ export default function App() {
             }}>
               <span style={{ fontSize: 11, color: v.text3, display: 'flex', alignItems: 'center', gap: 7 }}>
                 <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 8px rgba(34,197,94,0.6)' }} />
-                {mode === 'plan' ? 'Plan-and-Execute' : mode === 'graph' ? 'LangGraph + 自纠错' : 'AgentExecutor'}
+                {mode === 'plan' ? 'Plan-and-Execute' : mode === 'graph' ? 'LangGraph + 自纠错' : mode === 'human' ? '人机协作' : 'AgentExecutor'}
               </span>
               <button onClick={() => setIsDark(!isDark)} style={{
                 width: 30, height: 30, borderRadius: 8, fontSize: 14, cursor: 'pointer',
@@ -751,12 +904,12 @@ export default function App() {
               <span style={{ flex: 1 }} />
               <button onClick={toggleMode} style={{
                 fontSize: 11, padding: '5px 12px', borderRadius: 8, cursor: 'pointer',
-                background: useLangGraph ? 'rgba(249,115,22,0.15)' : v.glass,
-                border: `1px solid ${useLangGraph ? 'rgba(249,115,22,0.3)' : v.border}`,
-                color: useLangGraph ? '#f97316' : v.text3,
+                background: mode !== 'agent' ? 'rgba(249,115,22,0.15)' : v.glass,
+                border: `1px solid ${mode !== 'agent' ? 'rgba(249,115,22,0.3)' : v.border}`,
+                color: mode !== 'agent' ? '#f97316' : v.text3,
                 fontFamily: 'inherit', WebkitAppRegion: 'no-drag' as any,
                 transition: 'all 0.2s',
-              }}>{mode === 'plan' ? '📋 Plan' : mode === 'graph' ? '🔗 LangGraph' : '⚡ Agent'}</button>
+              }}>{mode === 'plan' ? '📋 Plan' : mode === 'graph' ? '🔗 LangGraph' : mode === 'human' ? '🤝 Human' : '⚡ Agent'}</button>
               <button onClick={clearChat} style={{
                 fontSize: 11, padding: '5px 12px', borderRadius: 8, cursor: 'pointer',
                 background: v.glass, border: `1px solid ${v.border}`, color: v.text3,
@@ -779,7 +932,7 @@ export default function App() {
                   }}>⚡</div>
                   <div style={{ fontSize: 22, fontWeight: 700, color: v.text }}>What can I help with?</div>
                   <div style={{ fontSize: 13, color: v.text3 }}>
-                    {mode === 'plan' ? '📋 Plan-and-Execute Mode' : mode === 'graph' ? '🔗 LangGraph ReAct + 自纠错 Mode' : '⚡ AgentExecutor Mode'} · Powered by DeepSeek
+                    {mode === 'plan' ? '📋 Plan-and-Execute Mode' : mode === 'graph' ? '🔗 LangGraph ReAct + 自纠错 Mode' : mode === 'human' ? '🤝 人机协作 Mode' : '⚡ AgentExecutor Mode'} · Powered by DeepSeek
                   </div>
                 </div>
               ) : (
