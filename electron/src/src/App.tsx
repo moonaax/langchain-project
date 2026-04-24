@@ -11,7 +11,8 @@ const API = 'http://127.0.0.1:8000';
 type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_start'; tool: string; input: string }
-  | { type: 'tool_end'; tool: string; output: string };
+  | { type: 'tool_end'; tool: string; output: string }
+  | { type: 'tool_retry'; message: string };
 
 interface Msg {
   key: string;
@@ -24,10 +25,16 @@ interface Msg {
 // ── SSE 解析 ──
 
 interface SSEEvent {
-  type: 'tool_start' | 'tool_end' | 'token' | 'done';
+  type: 'tool_start' | 'tool_end' | 'tool_retry' | 'token' | 'done';
   data?: any;
 }
 
+// SSE 事件解析
+// tool_start: 工具开始执行
+// tool_end: 工具执行完成
+// tool_retry: 自纠错重试（工具失败后触发）
+// token: LLM 输出的逐字内容
+// done: 流结束
 function parseSSEEvent(block: string): SSEEvent | null {
   const lines = block.split('\n');
   let evtType = '', evtData = '';
@@ -38,6 +45,7 @@ function parseSSEEvent(block: string): SSEEvent | null {
   if (!evtType && !evtData) return null;
   if (evtType === 'tool_start') return { type: 'tool_start', data: JSON.parse(evtData) };
   if (evtType === 'tool_end') return { type: 'tool_end', data: JSON.parse(evtData) };
+  if (evtType === 'tool_retry') return { type: 'tool_retry', data: JSON.parse(evtData) };
   if (evtData === '[DONE]') return { type: 'done' };
   if (evtData) return { type: 'token', data: evtData };
   return null;
@@ -131,6 +139,32 @@ function ToolCard({ block, allBlocks, index, v }: {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── 重试提示卡片 ──
+// 自纠错：工具调用失败时，服务端会发送 tool_retry 事件
+// 前端显示橙色毛玻璃卡片，提示用户正在自动重试
+
+function RetryCard({ block, v }: {
+  block: ContentBlock & { type: 'tool_retry' };
+  v: typeof darkVars;
+}) {
+  return (
+    <div style={{
+      margin: '6px 0', borderRadius: 10, fontSize: 12, overflow: 'hidden',
+      background: 'rgba(249,115,22,0.06)', border: '1px solid rgba(249,115,22,0.2)',
+      backdropFilter: 'blur(20px)',
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '8px 12px',
+      }}>
+        <span style={{ fontSize: 14 }}>🔄</span>
+        <span style={{ fontWeight: 600, color: '#f97316' }}>自纠错重试</span>
+        <span style={{ color: v.text2, marginLeft: 4 }}>{block.message}</span>
+      </div>
     </div>
   );
 }
@@ -363,7 +397,7 @@ export default function App() {
     setUseLangGraph(next);
     const currentMsgs = messagesMap[activeConv] || [];
     if (currentMsgs.length > 0) {
-      setModeHint(next ? 'New messages will use LangGraph mode' : 'New messages will use AgentExecutor mode');
+      setModeHint(next ? 'New messages will use LangGraph + 自纠错 mode' : 'New messages will use AgentExecutor mode');
       setTimeout(() => setModeHint(''), 3000);
     }
   }, [useLangGraph, messagesMap, activeConv]);
@@ -417,6 +451,10 @@ export default function App() {
             const inputStr = typeof evt.data.input === 'object' ? JSON.stringify(evt.data.input) : String(evt.data.input);
             updateMessages(sid, prev => prev.map(m => m.key === aiKey ? {
               ...m, blocks: [...m.blocks, { type: 'tool_start', tool: evt.data.tool, input: inputStr }],
+            } : m));
+          } else if (evt.type === 'tool_retry') {
+            updateMessages(sid, prev => prev.map(m => m.key === aiKey ? {
+              ...m, blocks: [...m.blocks, { type: 'tool_retry', message: evt.data.message }],
             } : m));
           } else if (evt.type === 'tool_end') {
             updateMessages(sid, prev => prev.map(m => m.key === aiKey ? {
@@ -473,6 +511,9 @@ export default function App() {
           return <ToolCard key={i} block={block} allBlocks={msg.blocks} index={i} v={v} />;
         }
         if (block.type === 'tool_end') return null;
+        if (block.type === 'tool_retry') {
+          return <RetryCard key={i} block={block} v={v} />;
+        }
         if (block.type === 'text') {
           const md = renderMarkdown(block.text);
           return <XMarkdown key={i}>{md}</XMarkdown>;
@@ -560,7 +601,7 @@ export default function App() {
             }}>
               <span style={{ fontSize: 11, color: v.text3, display: 'flex', alignItems: 'center', gap: 7 }}>
                 <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 8px rgba(34,197,94,0.6)' }} />
-                {useLangGraph ? 'LangGraph' : 'AgentExecutor'}
+                {useLangGraph ? 'LangGraph + 自纠错' : 'AgentExecutor'}
               </span>
               <button onClick={() => setIsDark(!isDark)} style={{
                 width: 30, height: 30, borderRadius: 8, fontSize: 14, cursor: 'pointer',
@@ -592,7 +633,7 @@ export default function App() {
                 color: useLangGraph ? '#f97316' : v.text3,
                 fontFamily: 'inherit', WebkitAppRegion: 'no-drag' as any,
                 transition: 'all 0.2s',
-              }}>{useLangGraph ? '🔗 LangGraph' : '⚡ Agent'}</button>
+              }}>{useLangGraph ? '🔗 LangGraph + 自纠错' : '⚡ Agent'}</button>
               <button onClick={clearChat} style={{
                 fontSize: 11, padding: '5px 12px', borderRadius: 8, cursor: 'pointer',
                 background: v.glass, border: `1px solid ${v.border}`, color: v.text3,
@@ -615,7 +656,7 @@ export default function App() {
                   }}>⚡</div>
                   <div style={{ fontSize: 22, fontWeight: 700, color: v.text }}>What can I help with?</div>
                   <div style={{ fontSize: 13, color: v.text3 }}>
-                    {useLangGraph ? '🔗 LangGraph ReAct Mode' : '⚡ AgentExecutor Mode'} · Powered by DeepSeek
+                    {useLangGraph ? '🔗 LangGraph ReAct + 自纠错 Mode' : '⚡ AgentExecutor Mode'} · Powered by DeepSeek
                   </div>
                 </div>
               ) : (

@@ -103,30 +103,98 @@ def run_agent_executor():
 
 
 def run_langgraph_agent():
-    """LangGraph ReAct 模式（第四阶段）"""
-    from langgraph.graph import StateGraph, START, END, MessagesState
+    """LangGraph ReAct + 自纠错模式（第四阶段进阶）"""
+    from typing import TypedDict, Annotated
+    from operator import add
+    from langgraph.graph import StateGraph, START, END
     from langgraph.prebuilt import ToolNode
     from langgraph.checkpoint.memory import MemorySaver
+    from langchain_core.messages import SystemMessage, BaseMessage
 
     llm_with_tools = llm.bind_tools(all_tools)
     tool_node = ToolNode(all_tools)
+    MAX_RETRIES = 3
 
-    def agent_node(state: MessagesState) -> dict:
+    # ============================================================
+    # 【知识点】自纠错 State — 扩展 MessagesState，追踪重试次数
+    # ============================================================
+    # 默认 MessagesState 只有 messages 字段
+    # 自纠错需要额外追踪：retry_count（重试计数）、last_error（上次错误）
+    class AgentState(TypedDict):
+        messages: Annotated[list[BaseMessage], add]  # 消息历史（追加模式）
+        retry_count: int                               # 当前重试次数（覆盖模式）
+        last_error: str                                # 上次工具失败的错误信息
+
+    # ============================================================
+    # 【知识点】agent_node — LLM 推理节点
+    # ============================================================
+    def agent_node(state: AgentState) -> dict:
         response = llm_with_tools.invoke(state["messages"])
         return {"messages": [response]}
 
-    def should_continue(state: MessagesState) -> str:
+    # ============================================================
+    # 【知识点】should_continue — 条件路由（LLM 输出后）
+    # ============================================================
+    def should_continue(state: AgentState) -> str:
         last_msg = state["messages"][-1]
         if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
             return "tools"
         return END
 
-    graph = StateGraph(MessagesState)
+    # ============================================================
+    # 【知识点】check_tool_result — 工具执行后检查是否失败
+    # ============================================================
+    # 工具执行后路由：失败 → corrector，成功 → agent
+    # 判断逻辑：最后一条 ToolMessage 的 content 是否包含错误关键词
+    def check_tool_result(state: AgentState) -> str:
+        last_msg = state["messages"][-1]
+        content = last_msg.content if hasattr(last_msg, "content") else ""
+        retry_count = state.get("retry_count", 0)
+        is_error = any(kw in content for kw in ["错误", "error", "未找到", "失败", "无法"])
+        if is_error and retry_count < MAX_RETRIES:
+            return "corrector"  # 失败且未超限 → 自纠错
+        return "agent"          # 成功或已超限 → 正常回到 agent
+
+    # ============================================================
+    # 【知识点】corrector_node — 自纠错节点（核心）
+    # ============================================================
+    # 自纠错的核心：把错误信息转化为结构化的重试提示
+    # 1. 读取上次错误信息
+    # 2. 构造纠错提示（告诉 LLM 哪里失败、建议换什么策略）
+    # 3. 递增重试计数
+    def corrector_node(state: AgentState) -> dict:
+        last_error = state["messages"][-1].content
+        retry_count = state.get("retry_count", 0) + 1
+        correction_prompt = f"""⚠️ 工具调用失败（第 {retry_count} 次重试）：
+{last_error}
+
+请分析失败原因并换一种方式尝试：
+- 如果是参数错误，请修正参数后重试
+- 如果是工具选择错误，请换一个更合适的工具
+- 如果所有工具都无法解决，请直接用你的知识回答，并说明工具不可用"""
+        return {
+            "messages": [SystemMessage(content=correction_prompt)],
+            "retry_count": retry_count,
+            "last_error": last_error,
+        }
+
+    # ============================================================
+    # 【知识点】StateGraph 构建 — 带自纠错的 ReAct 图
+    # ============================================================
+    # 图结构：
+    #   START → agent ──有 tool_calls──→ tools ──失败──→ corrector → agent（纠错循环）
+    #                │                   │
+    #                │                   └──成功──→ agent（正常循环）
+    #                │
+    #                └──无 tool_calls──→ END
+    graph = StateGraph(AgentState)
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tool_node)
+    graph.add_node("corrector", corrector_node)
     graph.add_edge(START, "agent")
     graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
-    graph.add_edge("tools", "agent")
+    graph.add_conditional_edges("tools", check_tool_result, {"corrector": "corrector", "agent": "agent"})
+    graph.add_edge("corrector", "agent")
 
     memory = MemorySaver()
     app = graph.compile(checkpointer=memory)
@@ -134,8 +202,9 @@ def run_langgraph_agent():
     session_id = "langgraph"
     config = {"configurable": {"thread_id": session_id}}
 
-    print("🤖 DeepSeek Agent — LangGraph ReAct 模式（输入 quit 退出，输入 clear 清空历史）")
-    print("🔧 可用工具: 数学计算 | 当前时间 | 天气查询 | 📚 知识库检索\n")
+    print("🤖 DeepSeek Agent — LangGraph ReAct + 自纠错模式（输入 quit 退出，输入 clear 清空历史）")
+    print("🔧 可用工具: 数学计算 | 当前时间 | 天气查询 | 📚 知识库检索")
+    print("📊 自纠错: 工具失败时自动重试，最多 3 次\n")
 
     while True:
         user_input = input("你: ").strip()
@@ -151,7 +220,7 @@ def run_langgraph_agent():
 
         try:
             result = app.invoke(
-                {"messages": [HumanMessage(content=user_input)]},
+                {"messages": [HumanMessage(content=user_input)], "retry_count": 0, "last_error": ""},
                 config=config,
             )
             ai_msg = result["messages"][-1]
@@ -164,7 +233,7 @@ def main():
     print("🤖 DeepSeek Agent 终端版\n")
     print("选择执行模式：")
     print("  1. AgentExecutor（第三阶段，黑盒循环）")
-    print("  2. LangGraph（第四阶段，手动构建图）\n")
+    print("  2. LangGraph ReAct + 自纠错（第四阶段进阶）\n")
 
     choice = input("请输入 1 或 2: ").strip()
     if choice == "2":

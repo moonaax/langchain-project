@@ -3,23 +3,27 @@ FastAPI 后端：LangChain + DeepSeek Agent API
 
 第三阶段：新增知识库 RAG 检索工具
 第四阶段：新增 LangGraph ReAct Agent 端点
+第四阶段进阶：自纠错循环 — 工具失败时自动换策略重试
 
 AI Agent 知识点索引：
 - Agent API: AgentExecutor + astream_events 流式推送（旧）
 - LangGraph: StateGraph + ToolNode + 条件路由（新）
+- 自纠错: AgentState + corrector 节点 + 条件路由
 - RAG Tool: knowledge_search 工具，Agent 自主决定是否检索
 - SSE 协议: tool_start / tool_end / token / done 事件类型
 """
 
 import os
 import json
+from typing import TypedDict, Annotated
+from operator import add
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
@@ -86,33 +90,73 @@ agent_with_memory = RunnableWithMessageHistory(
 )
 
 # ============================================================
-# 【知识点】第四阶段 — LangGraph ReAct Agent
+# 【知识点】第四阶段 — LangGraph ReAct Agent + 自纠错
 # ============================================================
-# 用 LangGraph 手动构建 ReAct 图，替代 AgentExecutor 黑盒模式
-# 图结构：START → agent → ┬── 有 tool_calls → tools → agent（循环）
-#                         └── 无 tool_calls → END
+# 图结构（带自纠错）：
+#   START → agent → ┬── 有 tool_calls → tools → ┬── 失败 → corrector → agent（纠错循环）
+#                   │                           │
+#                   │                           └── 成功 → agent（正常循环）
+#                   │
+#                   └── 无 tool_calls → END
 
 llm_with_tools = llm.bind_tools(all_tools)
 tool_node = ToolNode(all_tools)
 
-def graph_agent_node(state: MessagesState) -> dict:
+MAX_RETRIES = 3
+
+class AgentState(TypedDict):
+    """扩展状态：追踪重试次数和错误信息"""
+    messages: Annotated[list[BaseMessage], add]
+    retry_count: int
+    last_error: str
+
+def graph_agent_node(state: AgentState) -> dict:
     """LLM 推理节点"""
     response = llm_with_tools.invoke(state["messages"])
     return {"messages": [response]}
 
-def should_continue(state: MessagesState) -> str:
+def should_continue(state: AgentState) -> str:
     """条件路由：有 tool_calls → tools，否则 END"""
     last_msg = state["messages"][-1]
     if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
         return "tools"
     return END
 
-graph = StateGraph(MessagesState)
+def check_tool_result(state: AgentState) -> str:
+    """工具执行后路由：失败 → corrector，成功 → agent"""
+    last_msg = state["messages"][-1]
+    content = last_msg.content if hasattr(last_msg, "content") else ""
+    retry_count = state.get("retry_count", 0)
+    is_error = any(kw in content for kw in ["错误", "error", "未找到", "失败", "无法"])
+    if is_error and retry_count < MAX_RETRIES:
+        return "corrector"
+    return "agent"
+
+def corrector_node(state: AgentState) -> dict:
+    """自纠错：分析失败原因，注入提示引导 LLM 换策略"""
+    last_error = state["messages"][-1].content
+    retry_count = state.get("retry_count", 0) + 1
+    correction_prompt = f"""⚠️ 工具调用失败（第 {retry_count} 次重试）：
+{last_error}
+
+请分析失败原因并换一种方式尝试：
+- 如果是参数错误，请修正参数后重试
+- 如果是工具选择错误，请换一个更合适的工具
+- 如果所有工具都无法解决，请直接用你的知识回答，并说明工具不可用"""
+    return {
+        "messages": [SystemMessage(content=correction_prompt)],
+        "retry_count": retry_count,
+        "last_error": last_error,
+    }
+
+graph = StateGraph(AgentState)
 graph.add_node("agent", graph_agent_node)
 graph.add_node("tools", tool_node)
+graph.add_node("corrector", corrector_node)
 graph.add_edge(START, "agent")
 graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
-graph.add_edge("tools", "agent")
+graph.add_conditional_edges("tools", check_tool_result, {"corrector": "corrector", "agent": "agent"})
+graph.add_edge("corrector", "agent")
 
 graph_memory = MemorySaver()
 graph_app = graph.compile(checkpointer=graph_memory)
@@ -168,9 +212,10 @@ async def chat(req: ChatRequest):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 # ============================================================
-# 【知识点】第四阶段 — LangGraph 流式端点
+# 【知识点】第四阶段 — LangGraph 流式端点（带自纠错）
 # ============================================================
 # 用 graph_app.astream_events 推流，与 AgentExecutor 端点协议一致
+# 新增：corrector 节点触发时推送 tool_retry 事件
 @app.post("/graph_chat")
 async def graph_chat(req: ChatRequest):
     config = {"configurable": {"thread_id": req.session_id}}
@@ -178,7 +223,7 @@ async def graph_chat(req: ChatRequest):
     async def generate():
         in_tool = False
         async for event in graph_app.astream_events(
-            {"messages": [HumanMessage(content=req.message)]},
+            {"messages": [HumanMessage(content=req.message)], "retry_count": 0, "last_error": ""},
             config=config, version="v2",
         ):
             kind = event["event"]
@@ -201,6 +246,10 @@ async def graph_chat(req: ChatRequest):
                     "output": output,
                 }, ensure_ascii=False)
                 yield f"event: tool_end\ndata: {payload}\n\n"
+
+            elif kind == "on_chain_start" and event.get("name") == "corrector":
+                # 自纠错节点触发时通知前端
+                yield f"event: tool_retry\ndata: {{\"message\": \"工具调用失败，正在自动重试...\"}}\n\n"
 
             elif kind == "on_chat_model_stream" and not in_tool:
                 chunk = event["data"].get("chunk")
