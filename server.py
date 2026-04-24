@@ -18,6 +18,7 @@ AI Agent 知识点索引：
 
 import os
 import json
+from pathlib import Path
 from typing import TypedDict, Annotated
 from operator import add
 from dotenv import load_dotenv
@@ -33,7 +34,8 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
 from langgraph.graph import StateGraph, START, END, MessagesState
 from langgraph.prebuilt import ToolNode
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+import aiosqlite
 from tools import all_tools
 
 load_dotenv()
@@ -161,8 +163,34 @@ graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: EN
 graph.add_conditional_edges("tools", check_tool_result, {"corrector": "corrector", "agent": "agent"})
 graph.add_edge("corrector", "agent")
 
-graph_memory = MemorySaver()
-graph_app = graph.compile(checkpointer=graph_memory)
+# ============================================================
+# 【知识点】AsyncSqliteSaver — SQLite 持久化检查点（重启不丢对话）
+# ============================================================
+# 替换 MemorySaver（纯内存），对话历史写入 checkpoints.db
+# 4 个模式共用同一个 SQLite 文件，用 thread_id 区分会话
+# FastAPI 是异步框架，必须用 AsyncSqliteSaver（不能用同步版 SqliteSaver）
+# 需要在启动事件中初始化（aiosqlite 需要事件循环）
+_db_path = str(Path(__file__).parent / "checkpoints.db")
+_checkpointer = None  # 启动时初始化
+
+@app.on_event("startup")
+async def init_checkpointer():
+    global _checkpointer, graph_app, plan_app, human_app
+    conn = await aiosqlite.connect(_db_path)
+    _checkpointer = AsyncSqliteSaver(conn=conn)
+    await _checkpointer.setup()
+    # 编译图（需要 checkpointer 就绪后才能编译）
+    graph_app = graph.compile(checkpointer=_checkpointer)
+    plan_app = plan_graph.compile(checkpointer=_checkpointer)
+    human_app = human_graph.compile(
+        checkpointer=_checkpointer,
+        interrupt_before=["tools"],
+    )
+
+# 占位，启动时替换
+graph_app = None
+plan_app = None
+human_app = None
 
 # ============================================================
 # 【知识点】第四阶段进阶 — Plan-and-Execute 图
@@ -364,9 +392,6 @@ plan_graph.add_conditional_edges("replanner", plan_should_continue, {
 })
 plan_graph.add_edge("finish", END)
 
-plan_memory = MemorySaver()
-plan_app = plan_graph.compile(checkpointer=plan_memory)
-
 # ============================================================
 # 【知识点】第四阶段进阶 — 人机协作图（interrupt_before）
 # ============================================================
@@ -384,12 +409,6 @@ human_graph.add_edge(START, "agent")
 human_graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
 human_graph.add_conditional_edges("tools", check_tool_result, {"corrector": "corrector", "agent": "agent"})
 human_graph.add_edge("corrector", "agent")
-
-human_memory = MemorySaver()
-human_app = human_graph.compile(
-    checkpointer=human_memory,
-    interrupt_before=["tools"],
-)
 
 class ChatRequest(BaseModel):
     message: str
@@ -627,7 +646,7 @@ async def human_confirm(req: ConfirmRequest):
 @app.post("/clear")
 async def clear(req: ClearRequest):
     store.pop(req.session_id, None)
-    graph_memory.delete_thread(req.session_id)
-    plan_memory.delete_thread(req.session_id)
-    human_memory.delete_thread(req.session_id)
+    await _checkpointer.delete_thread(req.session_id)
+    await _checkpointer.delete_thread(f"plan_{req.session_id}")
+    await _checkpointer.delete_thread(f"human_{req.session_id}")
     return {"status": "ok"}

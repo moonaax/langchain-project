@@ -18,6 +18,7 @@ AI Agent 知识点索引：
 """
 
 import os
+from pathlib import Path
 from typing import TypedDict, Annotated
 from operator import add
 from dotenv import load_dotenv
@@ -25,11 +26,21 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 from langgraph.graph import StateGraph, START, END, MessagesState
 from langgraph.prebuilt import ToolNode
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 from tools import all_tools
 
 load_dotenv()
+
+# ============================================================
+# 【知识点】SqliteSaver — SQLite 持久化检查点（重启不丢对话）
+# ============================================================
+# 替换 MemorySaver（纯内存），对话历史写入 checkpoints.db
+import sqlite3
+_db_path = str(Path(__file__).parent / "checkpoints.db")
+_conn = sqlite3.connect(_db_path, check_same_thread=False)
+_checkpointer = SqliteSaver(conn=_conn)
+_checkpointer.setup()
 
 # ============================================================
 # 【知识点】LLM 初始化 — 复用 DeepSeek 配置
@@ -139,8 +150,7 @@ react_graph.add_conditional_edges("agent", should_continue, {"tools": "tools", E
 react_graph.add_conditional_edges("tools", check_tool_result, {"corrector": "corrector", "agent": "agent"})
 react_graph.add_edge("corrector", "agent")
 
-react_memory = MemorySaver()
-react_app = react_graph.compile(checkpointer=react_memory)
+react_app = react_graph.compile(checkpointer=_checkpointer)
 
 
 # ============================================================
@@ -422,8 +432,7 @@ plan_graph.add_conditional_edges("replanner", should_continue_plan, {
 })
 plan_graph.add_edge("finish", END)
 
-plan_memory = MemorySaver()
-plan_app = plan_graph.compile(checkpointer=plan_memory)
+plan_app = plan_graph.compile(checkpointer=_checkpointer)
 
 
 # ============================================================
@@ -461,10 +470,9 @@ human_graph.add_conditional_edges("agent", should_continue, {"tools": "tools", E
 human_graph.add_conditional_edges("tools", check_tool_result, {"corrector": "corrector", "agent": "agent"})
 human_graph.add_edge("corrector", "agent")
 
-human_memory = MemorySaver()
 # 【知识点】interrupt_before — 在 tools 节点前暂停，等待用户确认
 human_app = human_graph.compile(
-    checkpointer=human_memory,
+    checkpointer=_checkpointer,
     interrupt_before=["tools"],
 )
 
@@ -489,7 +497,7 @@ def run_react():
         if user_input.lower() == "quit":
             return
         if user_input.lower() == "clear":
-            react_memory.delete_thread(session_id)
+            _checkpointer.delete_thread(session_id)
             print("✅ 对话历史已清空\n")
             continue
 
@@ -518,7 +526,7 @@ def run_plan_execute():
         if user_input.lower() == "quit":
             return
         if user_input.lower() == "clear":
-            plan_memory.delete_thread(session_id)
+            _checkpointer.delete_thread(session_id)
             print("✅ 对话历史已清空\n")
             continue
 
@@ -547,7 +555,7 @@ def run_human_loop():
         if user_input.lower() == "quit":
             return
         if user_input.lower() == "clear":
-            human_memory.delete_thread(session_id)
+            _checkpointer.delete_thread(session_id)
             print("✅ 对话历史已清空\n")
             continue
 

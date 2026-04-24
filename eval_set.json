@@ -1,0 +1,127 @@
+[
+  {
+    "question": "LCEL 是什么？",
+    "expected_keywords": ["LCEL", "管道", "Runnable", "LangChain Expression Language"],
+    "source_file": "3-LCEL表达式语言.md"
+  },
+  {
+    "question": "LCEL 的管道符怎么用？",
+    "expected_keywords": ["管道", "|", "chain", "串联"],
+    "source_file": "3-LCEL表达式语言.md"
+  },
+  {
+    "question": "RunnableParallel 是什么？",
+    "expected_keywords": ["RunnableParallel", "并行", "同时执行"],
+    "source_file": "3-LCEL表达式语言.md"
+  },
+  {
+    "question": "RAG 是什么？",
+    "expected_keywords": ["RAG", "检索增强", "Retrieval", "知识库"],
+    "source_file": "1-RAG基础与架构.md"
+  },
+  {
+    "question": "FAISS 是什么？",
+    "expected_keywords": ["FAISS", "向量", "索引", "Facebook"],
+    "source_file": "2-向量数据库与Embedding.md"
+  },
+  {
+    "question": "文本分块有哪些策略？",
+    "expected_keywords": ["分块", "chunk", "RecursiveCharacterTextSplitter", "重叠"],
+    "source_file": "1-RAG基础与架构.md"
+  },
+  {
+    "question": "Agent 和 Chain 有什么区别？",
+    "expected_keywords": ["Agent", "Chain", "自主决策", "工具调用"],
+    "source_file": "1-LangChain框架详解.md"
+  },
+  {
+    "question": "Function Calling 是什么？",
+    "expected_keywords": ["Function Calling", "工具调用", "函数调用", "LLM"],
+    "source_file": "Function Calling原理与实践.md"
+  },
+  {
+    "question": "LangGraph 的 StateGraph 是什么？",
+    "expected_keywords": ["StateGraph", "状态图", "节点", "边"],
+    "source_file": "4-第四阶段-LangGraph.md"
+  },
+  {
+    "question": "LangGraph 的条件路由怎么实现？",
+    "expected_keywords": ["条件路由", "add_conditional_edges", "should_continue"],
+    "source_file": "4-第四阶段-LangGraph.md"
+  },
+  {
+    "question": "自纠错循环是什么？",
+    "expected_keywords": ["自纠错", "corrector", "重试", "工具失败"],
+    "source_file": "4-第四阶段-LangGraph.md"
+  },
+  {
+    "question": "Plan-and-Execute 模式是什么？",
+    "expected_keywords": ["Plan", "Execute", "规划", "执行", "planner"],
+    "source_file": "4-第四阶段-LangGraph.md"
+  },
+  {
+    "question": "interrupt_before 是什么？",
+    "expected_keywords": ["interrupt_before", "暂停", "人机协作", "确认"],
+    "source_file": "4-第四阶段-LangGraph.md"
+  },
+  {
+    "question": "Activity 的生命周期有哪些方法？",
+    "expected_keywords": ["onCreate", "onStart", "onResume", "onPause", "onStop", "onDestroy"],
+    "source_file": "1-Activity全解析.md"
+  },
+  {
+    "question": "Handler 机制是什么？",
+    "expected_keywords": ["Handler", "Looper", "MessageQueue", "消息机制"],
+    "source_file": "2-Handler消息机制.md"
+  },
+  {
+    "question": "Android 的四种启动模式是什么？",
+    "expected_keywords": ["standard", "singleTop", "singleTask", "singleInstance"],
+    "source_file": "1-Activity全解析.md"
+  },
+  {
+    "question": "Jetpack Lifecycle 是怎么工作的？",
+    "expected_keywords": ["Lifecycle", "观察者", "LifecycleObserver", "状态"],
+    "source_file": "1-Jetpack-Lifecycle与ViewModel.md"
+  },
+  {
+    "question": "ViewModel 为什么能在配置变更后存活？",
+    "expected_keywords": ["ViewModel", "配置变更", "onRetainNonConfigurationInstance", "ViewModelStore"],
+    "source_file": "1-Jetpack-Lifecycle与ViewModel.md"
+  },
+  {
+    "question": "Gradle 的生命周期有哪些阶段？",
+    "expected_keywords": ["初始化", "配置", "执行", "Gradle", "生命周期"],
+    "source_file": "1-Gradle生命周期与Task.md"
+  },
+  {
+    "question": "什么是 RAG 的混合检索？",
+    "expected_keywords": ["混合检索", "BM25", "向量", "RRF", "融合"],
+    "source_file": "3-RAG高级优化策略.md"
+  },
+  {
+    "question": "Embedding 模型的作用是什么？",
+    "expected_keywords": ["Embedding", "向量化", "语义", "相似度"],
+    "source_file": "2-向量数据库与Embedding.md"
+  },
+  {
+    "question": "AutoGen 是什么框架？",
+    "expected_keywords": ["AutoGen", "多Agent", "微软", "对话"],
+    "source_file": "3-AutoGen与多Agent框架.md"
+  },
+  {
+    "question": "记忆管理有哪些方案？",
+    "expected_keywords": ["记忆", "Memory", "SQLite", "持久化", "ConversationBufferMemory"],
+    "source_file": "1-记忆管理基础.md"
+  },
+  {
+    "question": "LeetCode 的双指针技巧有哪些？",
+    "expected_keywords": ["双指针", "左右指针", "快慢指针", "滑动窗口"],
+    "source_file": "2-双指针与滑动窗口.md"
+  },
+  {
+    "question": "动态规划的状态转移是什么？",
+    "expected_keywords": ["动态规划", "状态转移", "dp", "最优子结构"],
+    "source_file": "6-动态规划.md"
+  }
+]

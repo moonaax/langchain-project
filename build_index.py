@@ -1,13 +1,14 @@
 """
 知识库索引构建脚本
 
-离线阶段：加载 Markdown 文档 → 文本分块 → Embedding 向量化 → FAISS 持久化
+离线阶段：加载 Markdown 文档 → 文本分块 → Embedding 向量化 → FAISS 持久化 + BM25 数据
 
 AI Agent 知识点索引：
 - Document Loader: DirectoryLoader + TextLoader 批量加载 Markdown
 - Text Splitter: RecursiveCharacterTextSplitter 中文优化分块
 - Embedding: HuggingFaceEmbeddings 本地向量化（无需 API Key）
 - VectorStore: FAISS 高性能向量存储与持久化
+- BM25: jieba 分词 + rank_bm25，与向量检索混合使用（RRF 融合排序）
 
 用法：
     python3 build_index.py                          # 使用默认知识库路径
@@ -15,9 +16,11 @@ AI Agent 知识点索引：
 """
 
 import sys
+import json
 from pathlib import Path
+import jieba
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 
@@ -92,7 +95,27 @@ def build():
     print(f"📦 构建 FAISS 索引...")
     vectorstore = FAISS.from_documents(chunks, embeddings)
     vectorstore.save_local(str(INDEX_DIR))
-    print(f"✅ 索引已保存到 {INDEX_DIR}（{len(chunks)} 个向量）")
+    print(f"✅ FAISS 索引已保存到 {INDEX_DIR}（{len(chunks)} 个向量）")
+
+    # ============================================================
+    # 【知识点】BM25 语料 — jieba 分词后保存，供混合检索使用
+    # ============================================================
+    # 混合检索 = 向量检索（语义相似）+ BM25（关键词匹配）
+    # RRF (Reciprocal Rank Fusion) 融合两路结果的排名
+    # 需要在构建索引时保存分词后的语料，运行时加载即可
+    print(f"🔤 构建 BM25 语料（jieba 分词）...")
+    bm25_corpus = []
+    for chunk in chunks:
+        tokens = list(jieba.cut(chunk.page_content))
+        bm25_corpus.append({
+            "tokens": tokens,
+            "content": chunk.page_content,
+            "source": chunk.metadata.get("source", ""),
+        })
+    bm25_path = INDEX_DIR / "bm25_corpus.json"
+    with open(bm25_path, "w", encoding="utf-8") as f:
+        json.dump(bm25_corpus, f, ensure_ascii=False)
+    print(f"✅ BM25 语料已保存到 {bm25_path}（{len(bm25_corpus)} 条）")
 
 if __name__ == "__main__":
     build()

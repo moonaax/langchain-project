@@ -1,5 +1,8 @@
 .env
 faiss_index/
+checkpoints.db
+checkpoints.db-shm
+checkpoints.db-wal
 server.log
 __pycache__/
 node_modules/
