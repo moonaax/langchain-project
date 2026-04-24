@@ -3,14 +3,17 @@ FastAPI 后端：LangChain + DeepSeek Agent API
 
 第三阶段：新增知识库 RAG 检索工具
 第四阶段：新增 LangGraph ReAct Agent 端点
-第四阶段进阶：自纠错循环 — 工具失败时自动换策略重试
+第四阶段进阶：
+  - 自纠错循环 — 工具失败时自动换策略重试
+  - Plan-and-Execute — 先规划再执行，提高复杂任务成功率
 
 AI Agent 知识点索引：
 - Agent API: AgentExecutor + astream_events 流式推送（旧）
 - LangGraph: StateGraph + ToolNode + 条件路由（新）
 - 自纠错: AgentState + corrector 节点 + 条件路由
+- Plan-and-Execute: planner → executor → replanner 图结构
 - RAG Tool: knowledge_search 工具，Agent 自主决定是否检索
-- SSE 协议: tool_start / tool_end / token / done 事件类型
+- SSE 协议: tool_start / tool_end / tool_retry / plan_step / token / done
 """
 
 import os
@@ -161,6 +164,209 @@ graph.add_edge("corrector", "agent")
 graph_memory = MemorySaver()
 graph_app = graph.compile(checkpointer=graph_memory)
 
+# ============================================================
+# 【知识点】第四阶段进阶 — Plan-and-Execute 图
+# ============================================================
+# 图结构：
+#   START → planner → executor → replanner ──继续──→ executor（循环）
+#                                  │
+#                                  └──完成──→ finish → END
+
+class PlanExecuteState(TypedDict):
+    """Plan-and-Execute 状态：追踪计划、执行进度、结果"""
+    messages: Annotated[list[BaseMessage], add]
+    plan: list[str]
+    current_step: int
+    past_steps: list[dict]
+    response: str
+
+PLANNER_PROMPT = """你是一个任务规划专家。请把用户的问题拆解为清晰的执行步骤。
+
+可用工具：
+- calculator: 数学计算
+- get_current_time: 获取当前时间
+- search_weather: 查询天气
+- knowledge_search: 从知识库检索技术文档
+
+规则：
+1. 每个步骤应该是独立可执行的
+2. 步骤之间有逻辑顺序
+3. 需要检索知识的步骤，明确写出检索关键词
+4. 最后一步应该是整合信息并给出最终回答
+5. 步骤数量控制在 2-5 步
+
+请用 JSON 数组格式输出步骤列表，例如：
+["步骤1: 查询xxx", "步骤2: 计算xxx", "步骤3: 整合回答"]
+
+只输出 JSON 数组，不要输出其他内容。"""
+
+def plan_planner_node(state: PlanExecuteState) -> dict:
+    """规划节点：根据用户问题生成执行计划"""
+    user_query = state["messages"][0].content
+    response = llm.invoke([
+        SystemMessage(content=PLANNER_PROMPT),
+        HumanMessage(content=f"用户问题：{user_query}"),
+    ])
+    content = response.content
+    try:
+        if "```" in content:
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+        plan = json.loads(content.strip())
+    except (json.JSONDecodeError, IndexError):
+        plan = [f"直接回答用户的问题：{user_query}"]
+    return {"plan": plan, "current_step": 0, "past_steps": [], "response": ""}
+
+EXECUTOR_PROMPT = """你是一个任务执行专家。请执行当前步骤。
+
+已执行的步骤和结果：
+{past_steps}
+
+当前要执行的步骤：{current_step}
+
+可用工具：
+- calculator: 数学计算
+- get_current_time: 获取当前时间
+- search_weather: 查询天气
+- knowledge_search: 从知识库检索技术文档
+
+请直接执行这个步骤。如果需要调用工具就调用工具，不需要就直接输出结果。"""
+
+def plan_executor_node(state: PlanExecuteState) -> dict:
+    """执行节点：执行当前步骤，支持工具调用"""
+    plan = state["plan"]
+    current_idx = state["current_step"]
+    if current_idx >= len(plan):
+        return {"response": "所有步骤已执行完成。"}
+
+    current_step = plan[current_idx]
+    past_steps_text = ""
+    if state["past_steps"]:
+        for i, ps in enumerate(state["past_steps"]):
+            past_steps_text += f"步骤{i+1}: {ps['step']}\n结果: {ps['result']}\n\n"
+
+    prompt = EXECUTOR_PROMPT.format(
+        past_steps=past_steps_text or "（这是第一个步骤）",
+        current_step=current_step,
+    )
+
+    response = llm_with_tools.invoke([
+        SystemMessage(content=prompt),
+        HumanMessage(content=f"请执行：{current_step}"),
+    ])
+
+    result = response.content
+    if hasattr(response, "tool_calls") and response.tool_calls:
+        from langchain_core.messages import ToolMessage
+        tool_results = []
+        for tc in response.tool_calls:
+            for tool in all_tools:
+                if tool.name == tc["name"]:
+                    try:
+                        tool_output = tool.invoke(tc["args"])
+                        tool_results.append(f"[{tc['name']}] {tool_output}")
+                    except Exception as e:
+                        tool_results.append(f"[{tc['name']}] 错误: {e}")
+                    break
+        result = "\n".join(tool_results)
+
+    past_steps = state["past_steps"] + [{"step": current_step, "result": result}]
+    return {
+        "past_steps": past_steps,
+        "current_step": current_idx + 1,
+        "messages": [SystemMessage(content=f"步骤 {current_idx + 1} 执行结果：{result}")],
+    }
+
+REPLANNER_PROMPT = """你是一个任务评估专家。请根据已执行的步骤结果，决定下一步。
+
+用户原始问题：{original_query}
+
+已执行的步骤：
+{past_steps}
+
+剩余计划：
+{remaining_plan}
+
+请判断：
+1. 如果剩余计划仍然合理，输出 {{"action": "continue"}}
+2. 如果需要调整计划，输出 {{"action": "replan", "new_plan": ["步骤1", "步骤2", ...]}}
+3. 如果已经可以给出最终回答，输出 {{"action": "finish", "response": "最终回答内容"}}
+
+只输出 JSON，不要输出其他内容。"""
+
+def plan_replanner_node(state: PlanExecuteState) -> dict:
+    """重新规划节点：根据执行结果动态调整计划"""
+    original_query = state["messages"][0].content
+    past_steps = state["past_steps"]
+    plan = state["plan"]
+    current_step = state["current_step"]
+
+    past_steps_text = ""
+    for i, ps in enumerate(past_steps):
+        past_steps_text += f"步骤{i+1}: {ps['step']}\n结果: {ps['result']}\n\n"
+
+    remaining = plan[current_step:]
+    remaining_text = "\n".join(f"{i+1}. {s}" for i, s in enumerate(remaining)) if remaining else "（无）"
+
+    prompt = REPLANNER_PROMPT.format(
+        original_query=original_query,
+        past_steps=past_steps_text or "（无）",
+        remaining_plan=remaining_text,
+    )
+
+    response = llm.invoke([
+        SystemMessage(content=prompt),
+        HumanMessage(content="请评估并决定下一步。"),
+    ])
+
+    try:
+        content = response.content
+        if "```" in content:
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+        decision = json.loads(content.strip())
+    except (json.JSONDecodeError, IndexError):
+        decision = {"action": "continue"}
+
+    action = decision.get("action", "continue")
+    if action == "finish":
+        return {"response": decision.get("response", "任务完成。")}
+    elif action == "replan":
+        new_plan = decision.get("new_plan", plan[current_step:])
+        return {"plan": new_plan, "current_step": 0, "past_steps": past_steps}
+    return {}
+
+def plan_should_continue(state: PlanExecuteState) -> str:
+    """判断计划是否执行完成"""
+    if state.get("response"):
+        return "finish"
+    if state.get("current_step", 0) >= len(state.get("plan", [])):
+        return "finish"
+    return "continue"
+
+def plan_finish_node(state: PlanExecuteState) -> dict:
+    """将最终回答添加到消息历史"""
+    return {"messages": [AIMessage(content=state["response"])]}
+
+plan_graph = StateGraph(PlanExecuteState)
+plan_graph.add_node("planner", plan_planner_node)
+plan_graph.add_node("executor", plan_executor_node)
+plan_graph.add_node("replanner", plan_replanner_node)
+plan_graph.add_node("finish", plan_finish_node)
+plan_graph.add_edge(START, "planner")
+plan_graph.add_edge("planner", "executor")
+plan_graph.add_edge("executor", "replanner")
+plan_graph.add_conditional_edges("replanner", plan_should_continue, {
+    "continue": "executor",
+    "finish": "finish",
+})
+plan_graph.add_edge("finish", END)
+
+plan_memory = MemorySaver()
+plan_app = plan_graph.compile(checkpointer=plan_memory)
+
 class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
@@ -260,8 +466,74 @@ async def graph_chat(req: ChatRequest):
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
+# ============================================================
+# 【知识点】第四阶段进阶 — Plan-and-Execute 流式端点
+# ============================================================
+# 用 plan_app.astream_events 推流，新增 plan_step 事件通知前端当前执行步骤
+@app.post("/plan_chat")
+async def plan_chat(req: ChatRequest):
+    config = {"configurable": {"thread_id": f"plan_{req.session_id}"}}
+
+    async def generate():
+        async for event in plan_app.astream_events(
+            {"messages": [HumanMessage(content=req.message)], "plan": [], "current_step": 0, "past_steps": [], "response": ""},
+            config=config, version="v2",
+        ):
+            kind = event["event"]
+
+            # 规划节点完成时，推送计划步骤
+            if kind == "on_chain_end" and event.get("name") == "planner":
+                output = event["data"].get("output", {})
+                plan = output.get("plan", [])
+                if plan:
+                    payload = json.dumps({"plan": plan}, ensure_ascii=False)
+                    yield f"event: plan_start\ndata: {payload}\n\n"
+
+            # 执行节点完成时，推送当前步骤结果
+            elif kind == "on_chain_end" and event.get("name") == "executor":
+                output = event["data"].get("output", {})
+                current_step = output.get("current_step", 0)
+                past_steps = output.get("past_steps", [])
+                if past_steps:
+                    last_step = past_steps[-1]
+                    payload = json.dumps({
+                        "step": current_step,
+                        "description": last_step["step"],
+                        "result": last_step["result"][:500],
+                    }, ensure_ascii=False)
+                    yield f"event: plan_step\ndata: {payload}\n\n"
+
+            # 工具调用事件
+            elif kind == "on_tool_start":
+                payload = json.dumps({
+                    "tool": event["name"],
+                    "input": event["data"].get("input", {}),
+                }, ensure_ascii=False)
+                yield f"event: tool_start\ndata: {payload}\n\n"
+
+            elif kind == "on_tool_end":
+                output = event["data"].get("output", "")
+                if not isinstance(output, str):
+                    output = str(output)
+                payload = json.dumps({
+                    "tool": event["name"],
+                    "output": output,
+                }, ensure_ascii=False)
+                yield f"event: tool_end\ndata: {payload}\n\n"
+
+            # LLM 流式输出（最终回答）
+            elif kind == "on_chat_model_stream":
+                chunk = event["data"].get("chunk")
+                if chunk and chunk.content and isinstance(chunk.content, str):
+                    yield f"data: {chunk.content}\n\n"
+
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
 @app.post("/clear")
 async def clear(req: ClearRequest):
     store.pop(req.session_id, None)
     graph_memory.delete_thread(req.session_id)
+    plan_memory.delete_thread(req.session_id)
     return {"status": "ok"}

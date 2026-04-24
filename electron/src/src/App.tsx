@@ -12,7 +12,9 @@ type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_start'; tool: string; input: string }
   | { type: 'tool_end'; tool: string; output: string }
-  | { type: 'tool_retry'; message: string };
+  | { type: 'tool_retry'; message: string }
+  | { type: 'plan_start'; plan: string[] }
+  | { type: 'plan_step'; step: number; description: string; result: string };
 
 interface Msg {
   key: string;
@@ -25,7 +27,7 @@ interface Msg {
 // ── SSE 解析 ──
 
 interface SSEEvent {
-  type: 'tool_start' | 'tool_end' | 'tool_retry' | 'token' | 'done';
+  type: 'tool_start' | 'tool_end' | 'tool_retry' | 'plan_start' | 'plan_step' | 'token' | 'done';
   data?: any;
 }
 
@@ -33,6 +35,8 @@ interface SSEEvent {
 // tool_start: 工具开始执行
 // tool_end: 工具执行完成
 // tool_retry: 自纠错重试（工具失败后触发）
+// plan_start: Plan-and-Execute 模式，规划完成，推送计划步骤列表
+// plan_step: Plan-and-Execute 模式，某个步骤执行完成
 // token: LLM 输出的逐字内容
 // done: 流结束
 function parseSSEEvent(block: string): SSEEvent | null {
@@ -46,6 +50,8 @@ function parseSSEEvent(block: string): SSEEvent | null {
   if (evtType === 'tool_start') return { type: 'tool_start', data: JSON.parse(evtData) };
   if (evtType === 'tool_end') return { type: 'tool_end', data: JSON.parse(evtData) };
   if (evtType === 'tool_retry') return { type: 'tool_retry', data: JSON.parse(evtData) };
+  if (evtType === 'plan_start') return { type: 'plan_start', data: JSON.parse(evtData) };
+  if (evtType === 'plan_step') return { type: 'plan_step', data: JSON.parse(evtData) };
   if (evtData === '[DONE]') return { type: 'done' };
   if (evtData) return { type: 'token', data: evtData };
   return null;
@@ -164,6 +170,104 @@ function RetryCard({ block, v }: {
         <span style={{ fontSize: 14 }}>🔄</span>
         <span style={{ fontWeight: 600, color: '#f97316' }}>自纠错重试</span>
         <span style={{ color: v.text2, marginLeft: 4 }}>{block.message}</span>
+      </div>
+    </div>
+  );
+}
+
+// ── 计划卡片 ──
+// Plan-and-Execute：显示计划步骤列表和执行进度
+
+function PlanCard({ block, allBlocks, index, v }: {
+  block: ContentBlock & { type: 'plan_start' };
+  allBlocks: ContentBlock[];
+  index: number;
+  v: typeof darkVars;
+}) {
+  const [expanded, setExpanded] = useState(true);
+
+  // 统计已完成的步骤
+  const completedSteps = allBlocks
+    .filter((b, i) => i > index && b.type === 'plan_step')
+    .map(b => (b as ContentBlock & { type: 'plan_step' }).step);
+  const maxCompleted = completedSteps.length > 0 ? Math.max(...completedSteps) : 0;
+
+  return (
+    <div style={{
+      margin: '6px 0', borderRadius: 10, fontSize: 12, overflow: 'hidden',
+      background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.2)',
+      backdropFilter: 'blur(20px)',
+    }}>
+      {/* Header */}
+      <div
+        onClick={() => setExpanded(!expanded)}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '8px 12px', cursor: 'pointer',
+          background: 'rgba(99,102,241,0.04)',
+        }}
+      >
+        <span style={{ fontSize: 14 }}>📋</span>
+        <span style={{ fontWeight: 600, color: '#6366f1' }}>执行计划</span>
+        <span style={{ flex: 1 }} />
+        <span style={{ fontSize: 10, color: v.text3 }}>
+          {maxCompleted}/{block.plan.length} 步
+        </span>
+        <span style={{
+          fontSize: 10, color: v.text3, transition: 'transform 0.2s',
+          transform: expanded ? 'rotate(180deg)' : 'rotate(0)',
+        }}>▾</span>
+      </div>
+
+      {/* Body */}
+      {expanded && (
+        <div style={{ borderTop: `1px solid ${v.border}` }}>
+          {block.plan.map((step, i) => {
+            const isCompleted = i < maxCompleted;
+            const isCurrent = i === maxCompleted;
+            return (
+              <div key={i} style={{
+                padding: '6px 12px',
+                display: 'flex', alignItems: 'flex-start', gap: 8,
+                background: isCurrent ? 'rgba(99,102,241,0.08)' : 'transparent',
+                borderLeft: isCurrent ? '2px solid #6366f1' : '2px solid transparent',
+              }}>
+                <span style={{ fontSize: 12, minWidth: 16, textAlign: 'center' }}>
+                  {isCompleted ? '✅' : isCurrent ? '▶️' : '○'}
+                </span>
+                <span style={{
+                  color: isCompleted ? v.text3 : isCurrent ? v.text : v.text2,
+                  textDecoration: isCompleted ? 'line-through' : 'none',
+                }}>{step}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── 计算步骤结果卡片 ──
+// Plan-and-Execute：显示某个步骤的执行结果
+
+function PlanStepCard({ block, v }: {
+  block: ContentBlock & { type: 'plan_step' };
+  v: typeof darkVars;
+}) {
+  return (
+    <div style={{
+      margin: '4px 0', borderRadius: 8, fontSize: 12, overflow: 'hidden',
+      background: 'rgba(99,102,241,0.04)', border: '1px solid rgba(99,102,241,0.1)',
+      marginLeft: 20,
+    }}>
+      <div style={{ padding: '6px 10px' }}>
+        <div style={{ fontWeight: 600, color: '#6366f1', marginBottom: 2 }}>
+          步骤 {block.step}: {block.description}
+        </div>
+        <div style={{ color: v.text2, whiteSpace: 'pre-wrap' }}>
+          {block.result}
+        </div>
       </div>
     </div>
   );
@@ -384,23 +488,27 @@ export default function App() {
     { key: 'default', label: 'New conversation' },
   ]);
   const [activeConv, setActiveConv] = useState('default');
-  const [useLangGraph, setUseLangGraph] = useState(false);
+  // 模式：agent / graph / plan
+  const [mode, setMode] = useState<'agent' | 'graph' | 'plan'>('agent');
   const [modeHint, setModeHint] = useState('');
   const idRef = useRef(0);
   const v = isDark ? darkVars : lightVars;
 
   const messages = messagesMap[activeConv] || [];
 
-  // 模式切换提示
+  // 模式切换（三档循环：agent → graph → plan → agent）
   const toggleMode = useCallback(() => {
-    const next = !useLangGraph;
-    setUseLangGraph(next);
+    const modes: Array<'agent' | 'graph' | 'plan'> = ['agent', 'graph', 'plan'];
+    const labels = { agent: 'AgentExecutor', graph: 'LangGraph + 自纠错', plan: 'Plan-and-Execute' };
+    const idx = modes.indexOf(mode);
+    const next = modes[(idx + 1) % modes.length];
+    setMode(next);
     const currentMsgs = messagesMap[activeConv] || [];
     if (currentMsgs.length > 0) {
-      setModeHint(next ? 'New messages will use LangGraph + 自纠错 mode' : 'New messages will use AgentExecutor mode');
+      setModeHint(`New messages will use ${labels[next]} mode`);
       setTimeout(() => setModeHint(''), 3000);
     }
-  }, [useLangGraph, messagesMap, activeConv]);
+  }, [mode, messagesMap, activeConv]);
 
   const updateMessages = useCallback((sessionId: string, updater: (prev: Msg[]) => Msg[]) => {
     setMessagesMap(prev => ({
@@ -428,7 +536,8 @@ export default function App() {
     );
 
     try {
-      const endpoint = useLangGraph ? '/graph_chat' : '/chat';
+      const endpointMap = { agent: '/chat', graph: '/graph_chat', plan: '/plan_chat' };
+      const endpoint = endpointMap[mode];
       const res = await fetch(`${API}${endpoint}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text, session_id: sid }),
@@ -455,6 +564,14 @@ export default function App() {
           } else if (evt.type === 'tool_retry') {
             updateMessages(sid, prev => prev.map(m => m.key === aiKey ? {
               ...m, blocks: [...m.blocks, { type: 'tool_retry', message: evt.data.message }],
+            } : m));
+          } else if (evt.type === 'plan_start') {
+            updateMessages(sid, prev => prev.map(m => m.key === aiKey ? {
+              ...m, blocks: [...m.blocks, { type: 'plan_start', plan: evt.data.plan }],
+            } : m));
+          } else if (evt.type === 'plan_step') {
+            updateMessages(sid, prev => prev.map(m => m.key === aiKey ? {
+              ...m, blocks: [...m.blocks, { type: 'plan_step', step: evt.data.step, description: evt.data.description, result: evt.data.result }],
             } : m));
           } else if (evt.type === 'tool_end') {
             updateMessages(sid, prev => prev.map(m => m.key === aiKey ? {
@@ -483,7 +600,7 @@ export default function App() {
     updateMessages(sid, prev => prev.map(m =>
       m.key === aiKey ? { ...m, streaming: false } : m));
     setLoading(false);
-  }, [loading, activeConv, useLangGraph, updateMessages]);
+  }, [loading, activeConv, mode, updateMessages]);
 
   const clearChat = useCallback(async () => {
     await fetch(`${API}/clear`, {
@@ -513,6 +630,12 @@ export default function App() {
         if (block.type === 'tool_end') return null;
         if (block.type === 'tool_retry') {
           return <RetryCard key={i} block={block} v={v} />;
+        }
+        if (block.type === 'plan_start') {
+          return <PlanCard key={i} block={block} allBlocks={msg.blocks} index={i} v={v} />;
+        }
+        if (block.type === 'plan_step') {
+          return <PlanStepCard key={i} block={block} v={v} />;
         }
         if (block.type === 'text') {
           const md = renderMarkdown(block.text);
@@ -601,7 +724,7 @@ export default function App() {
             }}>
               <span style={{ fontSize: 11, color: v.text3, display: 'flex', alignItems: 'center', gap: 7 }}>
                 <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 8px rgba(34,197,94,0.6)' }} />
-                {useLangGraph ? 'LangGraph + 自纠错' : 'AgentExecutor'}
+                {mode === 'plan' ? 'Plan-and-Execute' : mode === 'graph' ? 'LangGraph + 自纠错' : 'AgentExecutor'}
               </span>
               <button onClick={() => setIsDark(!isDark)} style={{
                 width: 30, height: 30, borderRadius: 8, fontSize: 14, cursor: 'pointer',
@@ -633,7 +756,7 @@ export default function App() {
                 color: useLangGraph ? '#f97316' : v.text3,
                 fontFamily: 'inherit', WebkitAppRegion: 'no-drag' as any,
                 transition: 'all 0.2s',
-              }}>{useLangGraph ? '🔗 LangGraph + 自纠错' : '⚡ Agent'}</button>
+              }}>{mode === 'plan' ? '📋 Plan' : mode === 'graph' ? '🔗 LangGraph' : '⚡ Agent'}</button>
               <button onClick={clearChat} style={{
                 fontSize: 11, padding: '5px 12px', borderRadius: 8, cursor: 'pointer',
                 background: v.glass, border: `1px solid ${v.border}`, color: v.text3,
@@ -656,7 +779,7 @@ export default function App() {
                   }}>⚡</div>
                   <div style={{ fontSize: 22, fontWeight: 700, color: v.text }}>What can I help with?</div>
                   <div style={{ fontSize: 13, color: v.text3 }}>
-                    {useLangGraph ? '🔗 LangGraph ReAct + 自纠错 Mode' : '⚡ AgentExecutor Mode'} · Powered by DeepSeek
+                    {mode === 'plan' ? '📋 Plan-and-Execute Mode' : mode === 'graph' ? '🔗 LangGraph ReAct + 自纠错 Mode' : '⚡ AgentExecutor Mode'} · Powered by DeepSeek
                   </div>
                 </div>
               ) : (
