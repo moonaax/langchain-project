@@ -115,9 +115,36 @@ class AgentState(TypedDict):
     retry_count: int
     last_error: str
 
+def _clean_tool_calls(messages):
+    """清理不完整的 tool_calls 消息
+
+    OpenAI API 要求 assistant 的 tool_calls 后面必须跟对应的 ToolMessage。
+    如果 graph 中途崩溃或被中断，checkpointer 保存的状态可能只有 tool_calls
+    没有 ToolMessage，导致下次调用 400 错误。
+    """
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    # 收集所有已响应的 tool_call_id
+    responded_ids = set()
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            responded_ids.add(msg.tool_call_id)
+
+    # 过滤：跳过没有对应 ToolMessage 的 assistant tool_calls
+    cleaned = []
+    for msg in messages:
+        if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
+            missing = [tc for tc in msg.tool_calls if tc["id"] not in responded_ids]
+            if missing:
+                # 这条 assistant 消息有未响应的 tool_calls，跳过
+                continue
+        cleaned.append(msg)
+    return cleaned
+
 def graph_agent_node(state: AgentState) -> dict:
     """LLM 推理节点"""
-    response = llm_with_tools.invoke(state["messages"])
+    messages = _clean_tool_calls(state["messages"])
+    response = llm_with_tools.invoke(messages)
     return {"messages": [response]}
 
 def should_continue(state: AgentState) -> str:
