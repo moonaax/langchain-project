@@ -5,6 +5,13 @@ import XMarkdown from '@ant-design/x-markdown';
 import type { ConversationsProps } from '@ant-design/x';
 
 const API = 'http://127.0.0.1:8000';
+const API_KEY = '';  // 与后端 .env 中的 API_KEY 一致，空字符串表示不认证
+
+const apiHeaders = (extra: Record<string, string> = {}) => {
+  const h: Record<string, string> = { ...extra };
+  if (API_KEY) h['X-API-Key'] = API_KEY;
+  return h;
+};
 
 // ── 类型定义 ──
 
@@ -636,7 +643,7 @@ export default function App() {
       const endpointMap = { agent: '/chat', graph: '/graph_chat', plan: '/plan_chat', human: '/human_chat' };
       const endpoint = endpointMap[mode];
       const res = await fetch(`${API}${endpoint}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: apiHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ message: text, session_id: sid }),
       });
 
@@ -723,7 +730,7 @@ export default function App() {
 
   const clearChat = useCallback(async () => {
     await fetch(`${API}/clear`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: apiHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ session_id: activeConv }),
     }).catch(() => {});
     updateMessages(activeConv, () => []);
@@ -744,7 +751,7 @@ export default function App() {
     setLoading(true);
     try {
       const res = await fetch(`${API}/human_confirm`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: apiHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ session_id: sessionId, confirm }),
       });
       const data = await res.json();

@@ -77,17 +77,13 @@ class TokenCounter:
         self.output_tokens = 0
 
     def update(self, event: dict):
-        """从 on_llm_end 事件中提取 token 用量"""
-        usage = event.get("data", {}).get("usage_metadata") or {}
-        if not usage:
-            # 兼容 OpenAI 格式的 generation_info
-            gen_info = event.get("data", {}).get("generation_info") or {}
-            usage = gen_info.get("token_usage") or {}
-            self.input_tokens += usage.get("prompt_tokens", 0)
-            self.output_tokens += usage.get("completion_tokens", 0)
-        else:
-            self.input_tokens += usage.get("input_tokens", 0)
-            self.output_tokens += usage.get("output_tokens", 0)
+        """从 on_chat_model_end 事件中提取 token 用量"""
+        output = event.get("data", {}).get("output")
+        if not output:
+            return
+        usage = getattr(output, "usage_metadata", None) or {}
+        self.input_tokens += usage.get("input_tokens", 0)
+        self.output_tokens += usage.get("output_tokens", 0)
 
     @property
     def total(self):
@@ -96,7 +92,8 @@ class TokenCounter:
     def log(self, endpoint: str, session_id: str):
         if self.total > 0:
             print(f"[Token] {endpoint} session={session_id} "
-                  f"input={self.input_tokens} output={self.output_tokens} total={self.total}")
+                  f"input={self.input_tokens} output={self.output_tokens} total={self.total}",
+                  flush=True)
 
 llm = ChatOpenAI(
     model="deepseek-chat",
@@ -514,7 +511,7 @@ async def chat(req: ChatRequest):
         ):
             kind = event["event"]
 
-            if kind == "on_llm_end":
+            if kind == "on_chat_model_end":
                 counter.update(event)
 
             elif kind == "on_tool_start":
@@ -565,7 +562,7 @@ async def graph_chat(req: ChatRequest):
         ):
             kind = event["event"]
 
-            if kind == "on_llm_end":
+            if kind == "on_chat_model_end":
                 counter.update(event)
 
             elif kind == "on_tool_start":
@@ -616,7 +613,7 @@ async def plan_chat(req: ChatRequest):
         ):
             kind = event["event"]
 
-            if kind == "on_llm_end":
+            if kind == "on_chat_model_end":
                 counter.update(event)
 
             # 规划节点完成时，推送计划步骤
