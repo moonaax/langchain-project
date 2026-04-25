@@ -43,6 +43,61 @@ load_dotenv()
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+# ============================================================
+# 【知识点】第六阶段 — API Key 认证中间件
+# ============================================================
+# 环境变量 API_KEY 为空时跳过认证（开发模式），非空时校验 X-API-Key 请求头
+API_KEY = os.getenv("API_KEY", "")
+
+@app.middleware("http")
+async def auth_middleware(request, call_next):
+    # 跳过：健康检查、OpenAPI 文档、CORS 预检
+    if request.url.path in ("/health", "/docs", "/openapi.json") or request.method == "OPTIONS":
+        return await call_next(request)
+    # 配置了 API_KEY 才校验
+    if API_KEY:
+        key = request.headers.get("x-api-key", "")
+        if key != API_KEY:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=401, content={"detail": "Invalid API Key"})
+    return await call_next(request)
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+# ============================================================
+# 【知识点】第六阶段 — Token 计数器
+# ============================================================
+# 从 astream_events 的 on_llm_end 事件中提取 token 用量
+# 每个请求独立计数，流结束后日志输出
+class TokenCounter:
+    def __init__(self):
+        self.input_tokens = 0
+        self.output_tokens = 0
+
+    def update(self, event: dict):
+        """从 on_llm_end 事件中提取 token 用量"""
+        usage = event.get("data", {}).get("usage_metadata") or {}
+        if not usage:
+            # 兼容 OpenAI 格式的 generation_info
+            gen_info = event.get("data", {}).get("generation_info") or {}
+            usage = gen_info.get("token_usage") or {}
+            self.input_tokens += usage.get("prompt_tokens", 0)
+            self.output_tokens += usage.get("completion_tokens", 0)
+        else:
+            self.input_tokens += usage.get("input_tokens", 0)
+            self.output_tokens += usage.get("output_tokens", 0)
+
+    @property
+    def total(self):
+        return self.input_tokens + self.output_tokens
+
+    def log(self, endpoint: str, session_id: str):
+        if self.total > 0:
+            print(f"[Token] {endpoint} session={session_id} "
+                  f"input={self.input_tokens} output={self.output_tokens} total={self.total}")
+
 llm = ChatOpenAI(
     model="deepseek-chat",
     base_url="https://api.deepseek.com",
@@ -452,13 +507,17 @@ async def chat(req: ChatRequest):
     config = {"configurable": {"session_id": req.session_id}}
 
     async def generate():
+        counter = TokenCounter()
         in_tool = False  # 标记是否在工具调用过程中
         async for event in agent_with_memory.astream_events(
             {"input": req.message}, config=config, version="v2"
         ):
             kind = event["event"]
 
-            if kind == "on_tool_start":
+            if kind == "on_llm_end":
+                counter.update(event)
+
+            elif kind == "on_tool_start":
                 in_tool = True
                 payload = json.dumps({
                     "tool": event["name"],
@@ -483,6 +542,7 @@ async def chat(req: ChatRequest):
                 if chunk and chunk.content and isinstance(chunk.content, str):
                     yield f"data: {chunk.content}\n\n"
 
+        counter.log("chat", req.session_id)
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
@@ -497,6 +557,7 @@ async def graph_chat(req: ChatRequest):
     config = {"configurable": {"thread_id": req.session_id}}
 
     async def generate():
+        counter = TokenCounter()
         in_tool = False
         async for event in graph_app.astream_events(
             {"messages": [HumanMessage(content=req.message)], "retry_count": 0, "last_error": ""},
@@ -504,7 +565,10 @@ async def graph_chat(req: ChatRequest):
         ):
             kind = event["event"]
 
-            if kind == "on_tool_start":
+            if kind == "on_llm_end":
+                counter.update(event)
+
+            elif kind == "on_tool_start":
                 in_tool = True
                 payload = json.dumps({
                     "tool": event["name"],
@@ -524,7 +588,6 @@ async def graph_chat(req: ChatRequest):
                 yield f"event: tool_end\ndata: {payload}\n\n"
 
             elif kind == "on_chain_start" and event.get("name") == "corrector":
-                # 自纠错节点触发时通知前端
                 yield f"event: tool_retry\ndata: {{\"message\": \"工具调用失败，正在自动重试...\"}}\n\n"
 
             elif kind == "on_chat_model_stream" and not in_tool:
@@ -532,6 +595,7 @@ async def graph_chat(req: ChatRequest):
                 if chunk and chunk.content and isinstance(chunk.content, str):
                     yield f"data: {chunk.content}\n\n"
 
+        counter.log("graph_chat", req.session_id)
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
@@ -545,11 +609,15 @@ async def plan_chat(req: ChatRequest):
     config = {"configurable": {"thread_id": f"plan_{req.session_id}"}}
 
     async def generate():
+        counter = TokenCounter()
         async for event in plan_app.astream_events(
             {"messages": [HumanMessage(content=req.message)], "plan": [], "current_step": 0, "past_steps": [], "response": ""},
             config=config, version="v2",
         ):
             kind = event["event"]
+
+            if kind == "on_llm_end":
+                counter.update(event)
 
             # 规划节点完成时，推送计划步骤
             if kind == "on_chain_end" and event.get("name") == "planner":
@@ -597,6 +665,7 @@ async def plan_chat(req: ChatRequest):
                 if chunk and chunk.content and isinstance(chunk.content, str):
                     yield f"data: {chunk.content}\n\n"
 
+        counter.log("plan_chat", req.session_id)
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")

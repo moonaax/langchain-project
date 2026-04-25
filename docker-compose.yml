@@ -1,0 +1,25 @@
+# ============================================================
+# 【知识点】第六阶段 — Docker Compose 编排
+# ============================================================
+# 用法：
+#   首次：docker compose up --build
+#   后续：docker compose up
+#   停止：docker compose down
+
+services:
+  backend:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      # FAISS 索引 + BM25 语料（避免每次重建）
+      - ./faiss_index:/app/faiss_index
+      # SQLite 持久化（重启不丢对话）
+      - ./checkpoints.db:/app/checkpoints.db
+      # HuggingFace 模型缓存（避免重复下载）
+      - hf_cache:/app/hf_cache
+    restart: unless-stopped
+
+volumes:
+  hf_cache:

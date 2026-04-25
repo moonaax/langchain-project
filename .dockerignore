@@ -1,0 +1,11 @@
+node_modules/
+electron/
+__pycache__/
+.env
+*.db
+*.db-shm
+*.db-wal
+.git
+.gitignore
+.DS_Store
+server.log
